@@ -43,7 +43,8 @@ public class GroupedTableOperationRepartitionNode<K, V> extends BaseRepartitionN
             keySerde,
             valueSerde,
             sinkName,
-            repartitionTopic
+            repartitionTopic,
+            null
         );
     }
 
@@ -102,10 +103,9 @@ public class GroupedTableOperationRepartitionNode<K, V> extends BaseRepartitionN
 
     }
 
-    public static GroupedTableOperationRepartitionNodeBuilder groupedTableOperationNodeBuilder() {
-        return new GroupedTableOperationRepartitionNodeBuilder();
+    public static <K1, V1> GroupedTableOperationRepartitionNodeBuilder<K1, V1> groupedTableOperationNodeBuilder() {
+        return new GroupedTableOperationRepartitionNodeBuilder<>();
     }
-
 
     public static final class GroupedTableOperationRepartitionNodeBuilder<K, V> {
 

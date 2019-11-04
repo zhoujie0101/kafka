@@ -22,6 +22,7 @@ import org.apache.kafka.common.security.auth._
 import org.junit.{Before, Test}
 import org.junit.Assert._
 import org.apache.kafka.common.errors.TopicAuthorizationException
+import org.scalatest.Assertions.intercept
 
 // This test case uses a separate listener for client and inter-broker communication, from
 // which we derive corresponding principals
@@ -70,15 +71,16 @@ class PlaintextEndToEndAuthorizationTest extends EndToEndAuthorizationTest {
   override val kafkaPrincipal = "server"
 
   @Before
-  override def setUp() {
+  override def setUp(): Unit = {
     startSasl(jaasSections(List.empty, None, ZkSasl))
     super.setUp()
   }
 
   @Test
-  def testListenerName() {
+  def testListenerName(): Unit = {
     // To check the client listener name, establish a session on the server by sending any request eg sendRecords
-    intercept[TopicAuthorizationException](sendRecords(1, tp))
+    val producer = createProducer()
+    intercept[TopicAuthorizationException](sendRecords(producer, numRecords = 1, tp))
 
     assertEquals(Some("CLIENT"), PlaintextEndToEndAuthorizationTest.clientListenerName)
     assertEquals(Some("SERVER"), PlaintextEndToEndAuthorizationTest.serverListenerName)

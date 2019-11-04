@@ -65,7 +65,7 @@ public class DescribeConfigsRequest extends AbstractRequest {
         return new Schema[]{DESCRIBE_CONFIGS_REQUEST_V0, DESCRIBE_CONFIGS_REQUEST_V1, DESCRIBE_CONFIGS_REQUEST_V2};
     }
 
-    public static class Builder extends AbstractRequest.Builder {
+    public static class Builder extends AbstractRequest.Builder<DescribeConfigsRequest> {
         private final Map<ConfigResource, Collection<String>> resourceToConfigNames;
         private boolean includeSynonyms;
 
@@ -100,13 +100,13 @@ public class DescribeConfigsRequest extends AbstractRequest {
     private final boolean includeSynonyms;
 
     public DescribeConfigsRequest(short version, Map<ConfigResource, Collection<String>> resourceToConfigNames, boolean includeSynonyms) {
-        super(version);
+        super(ApiKeys.DESCRIBE_CONFIGS, version);
         this.resourceToConfigNames = Objects.requireNonNull(resourceToConfigNames, "resourceToConfigNames");
         this.includeSynonyms = includeSynonyms;
     }
 
     public DescribeConfigsRequest(Struct struct, short version) {
-        super(version);
+        super(ApiKeys.DESCRIBE_CONFIGS, version);
         Object[] resourcesArray = struct.getArray(RESOURCES_KEY_NAME);
         resourceToConfigNames = new HashMap<>(resourcesArray.length);
         for (Object resourceObj : resourcesArray) {

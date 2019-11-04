@@ -24,7 +24,7 @@ import java.util.concurrent._
 import com.typesafe.scalalogging.Logger
 import com.yammer.metrics.core.{Gauge, Meter}
 import kafka.metrics.KafkaMetricsGroup
-import kafka.utils.{Logging, NotNothing}
+import kafka.utils.{Logging, NotNothing, Pool}
 import org.apache.kafka.common.memory.MemoryPool
 import org.apache.kafka.common.network.Send
 import org.apache.kafka.common.protocol.{ApiKeys, Errors}
@@ -115,7 +115,7 @@ object RequestChannel extends Logging {
       math.max(apiLocalCompleteTimeNanos - requestDequeueTimeNanos, 0L)
     }
 
-    def updateRequestMetrics(networkThreadTimeNanos: Long, response: Response) {
+    def updateRequestMetrics(networkThreadTimeNanos: Long, response: Response): Unit = {
       val endTimeNanos = Time.SYSTEM.nanoseconds
       // In some corner cases, apiLocalCompleteTimeNanos may not be set when the request completes if the remote
       // processing time is really small. This value is set in KafkaApis from a request handling thread.
@@ -272,17 +272,19 @@ object RequestChannel extends Logging {
   }
 }
 
-class RequestChannel(val queueSize: Int) extends KafkaMetricsGroup {
+class RequestChannel(val queueSize: Int, val metricNamePrefix : String) extends KafkaMetricsGroup {
   import RequestChannel._
   val metrics = new RequestChannel.Metrics
   private val requestQueue = new ArrayBlockingQueue[BaseRequest](queueSize)
   private val processors = new ConcurrentHashMap[Int, Processor]()
+  val requestQueueSizeMetricName = metricNamePrefix.concat(RequestQueueSizeMetric)
+  val responseQueueSizeMetricName = metricNamePrefix.concat(ResponseQueueSizeMetric)
 
-  newGauge(RequestQueueSizeMetric, new Gauge[Int] {
+  newGauge(requestQueueSizeMetricName, new Gauge[Int] {
       def value = requestQueue.size
   })
 
-  newGauge(ResponseQueueSizeMetric, new Gauge[Int]{
+  newGauge(responseQueueSizeMetricName, new Gauge[Int]{
     def value = processors.values.asScala.foldLeft(0) {(total, processor) =>
       total + processor.responseQueueSize
     }
@@ -292,7 +294,7 @@ class RequestChannel(val queueSize: Int) extends KafkaMetricsGroup {
     if (processors.putIfAbsent(processor.id, processor) != null)
       warn(s"Unexpected processor with processorId ${processor.id}")
 
-    newGauge(ResponseQueueSizeMetric,
+    newGauge(responseQueueSizeMetricName,
       new Gauge[Int] {
         def value = processor.responseQueueSize
       },
@@ -302,16 +304,16 @@ class RequestChannel(val queueSize: Int) extends KafkaMetricsGroup {
 
   def removeProcessor(processorId: Int): Unit = {
     processors.remove(processorId)
-    removeMetric(ResponseQueueSizeMetric, Map(ProcessorMetricTag -> processorId.toString))
+    removeMetric(responseQueueSizeMetricName, Map(ProcessorMetricTag -> processorId.toString))
   }
 
   /** Send a request to be handled, potentially blocking until there is room in the queue for the request */
-  def sendRequest(request: RequestChannel.Request) {
+  def sendRequest(request: RequestChannel.Request): Unit = {
     requestQueue.put(request)
   }
 
   /** Send a response back to the socket server to be sent over the network */
-  def sendResponse(response: RequestChannel.Response) {
+  def sendResponse(response: RequestChannel.Response): Unit = {
     if (isTraceEnabled) {
       val requestHeader = response.request.header
       val message = response match {
@@ -345,17 +347,17 @@ class RequestChannel(val queueSize: Int) extends KafkaMetricsGroup {
   def receiveRequest(): RequestChannel.BaseRequest =
     requestQueue.take()
 
-  def updateErrorMetrics(apiKey: ApiKeys, errors: collection.Map[Errors, Integer]) {
+  def updateErrorMetrics(apiKey: ApiKeys, errors: collection.Map[Errors, Integer]): Unit = {
     errors.foreach { case (error, count) =>
       metrics(apiKey.name).markErrorMeter(error, count)
     }
   }
 
-  def clear() {
+  def clear(): Unit = {
     requestQueue.clear()
   }
 
-  def shutdown() {
+  def shutdown(): Unit = {
     clear()
     metrics.close()
   }
@@ -387,7 +389,7 @@ class RequestMetrics(name: String) extends KafkaMetricsGroup {
   import RequestMetrics._
 
   val tags = Map("request" -> name)
-  val requestRateInternal = new mutable.HashMap[Short, Meter]
+  val requestRateInternal = new Pool[Short, Meter]()
   // time a request spent in a request queue
   val requestQueueTimeHist = newHistogram(RequestQueueTimeMs, biased = true, tags)
   // time a request takes to be processed at the local broker
@@ -421,7 +423,7 @@ class RequestMetrics(name: String) extends KafkaMetricsGroup {
   Errors.values.foreach(error => errorMeters.put(error, new ErrorMeter(name, error)))
 
   def requestRate(version: Short): Meter = {
-      requestRateInternal.getOrElseUpdate(version, newMeter("RequestsPerSec", "requests", TimeUnit.SECONDS, tags + ("version" -> version.toString)))
+    requestRateInternal.getAndMaybePut(version, newMeter("RequestsPerSec", "requests", TimeUnit.SECONDS, tags + ("version" -> version.toString)))
   }
 
   class ErrorMeter(name: String, error: Errors) {
@@ -451,12 +453,12 @@ class RequestMetrics(name: String) extends KafkaMetricsGroup {
     }
   }
 
-  def markErrorMeter(error: Errors, count: Int) {
+  def markErrorMeter(error: Errors, count: Int): Unit = {
     errorMeters(error).getOrCreateMeter().mark(count.toLong)
   }
 
   def removeMetrics(): Unit = {
-    for (version <- requestRateInternal.keySet) removeMetric(RequestsPerSec, tags + ("version" -> version.toString))
+    for (version <- requestRateInternal.keys) removeMetric(RequestsPerSec, tags + ("version" -> version.toString))
     removeMetric(RequestQueueTimeMs, tags)
     removeMetric(LocalTimeMs, tags)
     removeMetric(RemoteTimeMs, tags)

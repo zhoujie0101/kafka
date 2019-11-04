@@ -18,6 +18,7 @@ package org.apache.kafka.streams.kstream.internals;
 
 import org.apache.kafka.common.utils.Bytes;
 import org.apache.kafka.common.utils.Utils;
+import org.apache.kafka.streams.StreamsConfig;
 import org.apache.kafka.streams.kstream.Consumed;
 import org.apache.kafka.streams.kstream.GlobalKTable;
 import org.apache.kafka.streams.kstream.KStream;
@@ -33,6 +34,7 @@ import org.apache.kafka.streams.state.KeyValueStore;
 import org.apache.kafka.test.MockMapper;
 import org.apache.kafka.test.MockTimestampExtractor;
 import org.apache.kafka.test.MockValueJoiner;
+import org.apache.kafka.test.StreamsTestUtils;
 import org.junit.Test;
 
 import java.util.Collections;
@@ -42,14 +44,16 @@ import java.util.Map;
 import java.util.Set;
 import java.util.regex.Pattern;
 
+import static java.util.Arrays.asList;
 import static org.apache.kafka.streams.Topology.AutoOffsetReset;
 import static org.hamcrest.core.IsInstanceOf.instanceOf;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertThat;
 import static org.junit.Assert.assertTrue;
 
+@SuppressWarnings("unchecked")
 public class InternalStreamsBuilderTest {
 
     private static final String APP_ID = "app-id";
@@ -57,12 +61,7 @@ public class InternalStreamsBuilderTest {
     private final InternalStreamsBuilder builder = new InternalStreamsBuilder(new InternalTopologyBuilder());
     private final ConsumedInternal<String, String> consumed = new ConsumedInternal<>();
     private final String storePrefix = "prefix-";
-    private final MaterializedInternal<String, String, KeyValueStore<Bytes, byte[]>> materialized = new MaterializedInternal<>(Materialized.as("test-store"));
-
-    {
-        builder.internalTopologyBuilder.setApplicationId(APP_ID);
-        materialized.generateStoreNameIfNeeded(builder, storePrefix);
-    }
+    private final MaterializedInternal<String, String, KeyValueStore<Bytes, byte[]>> materialized = new MaterializedInternal<>(Materialized.as("test-store"), builder, storePrefix);
 
     @Test
     public void testNewName() {
@@ -121,33 +120,29 @@ public class InternalStreamsBuilderTest {
         merged.groupByKey().count(Materialized.<String, Long, KeyValueStore<Bytes, byte[]>>as("my-table"));
         builder.buildAndOptimizeTopology();
         final Map<String, List<String>> actual = builder.internalTopologyBuilder.stateStoreNameToSourceTopics();
-        assertEquals(Utils.mkList("topic-1", "topic-2", "topic-3"), actual.get("my-table"));
+        assertEquals(asList("topic-1", "topic-2", "topic-3"), actual.get("my-table"));
     }
 
     @Test
-    public void shouldStillMaterializeSourceKTableIfMaterializedIsntQueryable() {
+    public void shouldNotMaterializeSourceKTableIfNotRequired() {
         final MaterializedInternal<String, String, KeyValueStore<Bytes, byte[]>> materializedInternal =
-            new MaterializedInternal<>(Materialized.with(null, null));
-        materializedInternal.generateStoreNameIfNeeded(builder, storePrefix);
+            new MaterializedInternal<>(Materialized.with(null, null), builder, storePrefix);
         final KTable table1 = builder.table("topic2", consumed, materializedInternal);
 
         builder.buildAndOptimizeTopology();
-        final ProcessorTopology topology = builder.internalTopologyBuilder.build(null);
+        final ProcessorTopology topology = builder.internalTopologyBuilder
+            .rewriteTopology(new StreamsConfig(StreamsTestUtils.getStreamsConfig(APP_ID)))
+            .build(null);
 
-        assertEquals(1, topology.stateStores().size());
-        final String storeName = "prefix-STATE-STORE-0000000000";
-        assertEquals(storeName, topology.stateStores().get(0).name());
-
-        assertEquals(1, topology.storeToChangelogTopic().size());
-        assertEquals("app-id-prefix-STATE-STORE-0000000000-changelog", topology.storeToChangelogTopic().get(storeName));
+        assertEquals(0, topology.stateStores().size());
+        assertEquals(0, topology.storeToChangelogTopic().size());
         assertNull(table1.queryableStoreName());
     }
     
     @Test
     public void shouldBuildGlobalTableWithNonQueryableStoreName() {
         final MaterializedInternal<String, String, KeyValueStore<Bytes, byte[]>> materializedInternal =
-            new MaterializedInternal<>(Materialized.with(null, null));
-        materializedInternal.generateStoreNameIfNeeded(builder, storePrefix);
+            new MaterializedInternal<>(Materialized.with(null, null), builder, storePrefix);
 
         final GlobalKTable<String, String> table1 = builder.globalTable("topic2", consumed, materializedInternal);
 
@@ -157,8 +152,7 @@ public class InternalStreamsBuilderTest {
     @Test
     public void shouldBuildGlobalTableWithQueryaIbleStoreName() {
         final MaterializedInternal<String, String, KeyValueStore<Bytes, byte[]>> materializedInternal =
-            new MaterializedInternal<>(Materialized.as("globalTable"));
-        materializedInternal.generateStoreNameIfNeeded(builder, storePrefix);
+            new MaterializedInternal<>(Materialized.as("globalTable"), builder, storePrefix);
         final GlobalKTable<String, String> table1 = builder.globalTable("topic2", consumed, materializedInternal);
 
         assertEquals("globalTable", table1.queryableStoreName());
@@ -167,14 +161,15 @@ public class InternalStreamsBuilderTest {
     @Test
     public void shouldBuildSimpleGlobalTableTopology() {
         final MaterializedInternal<String, String, KeyValueStore<Bytes, byte[]>> materializedInternal =
-            new MaterializedInternal<>(Materialized.as("globalTable"));
-        materializedInternal.generateStoreNameIfNeeded(builder, storePrefix);
+            new MaterializedInternal<>(Materialized.as("globalTable"), builder, storePrefix);
         builder.globalTable("table",
                             consumed,
             materializedInternal);
 
         builder.buildAndOptimizeTopology();
-        final ProcessorTopology topology = builder.internalTopologyBuilder.buildGlobalStateTopology();
+        final ProcessorTopology topology = builder.internalTopologyBuilder
+            .rewriteTopology(new StreamsConfig(StreamsTestUtils.getStreamsConfig(APP_ID)))
+            .buildGlobalStateTopology();
         final List<StateStore> stateStores = topology.globalStateStores();
 
         assertEquals(1, stateStores.size());
@@ -182,7 +177,9 @@ public class InternalStreamsBuilderTest {
     }
 
     private void doBuildGlobalTopologyWithAllGlobalTables() {
-        final ProcessorTopology topology = builder.internalTopologyBuilder.buildGlobalStateTopology();
+        final ProcessorTopology topology = builder.internalTopologyBuilder
+            .rewriteTopology(new StreamsConfig(StreamsTestUtils.getStreamsConfig(APP_ID)))
+            .buildGlobalStateTopology();
 
         final List<StateStore> stateStores = topology.globalStateStores();
         final Set<String> sourceTopics = topology.sourceTopics();
@@ -195,14 +192,12 @@ public class InternalStreamsBuilderTest {
     public void shouldBuildGlobalTopologyWithAllGlobalTables() {
         {
             final MaterializedInternal<String, String, KeyValueStore<Bytes, byte[]>> materializedInternal =
-                new MaterializedInternal<>(Materialized.as("global1"));
-            materializedInternal.generateStoreNameIfNeeded(builder, storePrefix);
+                new MaterializedInternal<>(Materialized.as("global1"), builder, storePrefix);
             builder.globalTable("table", consumed, materializedInternal);
         }
         {
             final MaterializedInternal<String, String, KeyValueStore<Bytes, byte[]>> materializedInternal =
-                new MaterializedInternal<>(Materialized.as("global2"));
-            materializedInternal.generateStoreNameIfNeeded(builder, storePrefix);
+                new MaterializedInternal<>(Materialized.as("global2"), builder, storePrefix);
             builder.globalTable("table2", consumed, materializedInternal);
         }
 
@@ -216,18 +211,15 @@ public class InternalStreamsBuilderTest {
         final String two = "globalTable2";
 
         final MaterializedInternal<String, String, KeyValueStore<Bytes, byte[]>> materializedInternal =
-            new MaterializedInternal<>(Materialized.as(one));
-        materializedInternal.generateStoreNameIfNeeded(builder, storePrefix);
+            new MaterializedInternal<>(Materialized.as(one), builder, storePrefix);
         final GlobalKTable<String, String> globalTable = builder.globalTable("table", consumed, materializedInternal);
 
         final MaterializedInternal<String, String, KeyValueStore<Bytes, byte[]>> materializedInternal2 =
-            new MaterializedInternal<>(Materialized.as(two));
-        materializedInternal2.generateStoreNameIfNeeded(builder, storePrefix);
+            new MaterializedInternal<>(Materialized.as(two), builder, storePrefix);
         final GlobalKTable<String, String> globalTable2 = builder.globalTable("table2", consumed, materializedInternal2);
 
         final MaterializedInternal<String, String, KeyValueStore<Bytes, byte[]>> materializedInternalNotGlobal =
-            new MaterializedInternal<>(Materialized.as("not-global"));
-        materializedInternalNotGlobal.generateStoreNameIfNeeded(builder, storePrefix);
+            new MaterializedInternal<>(Materialized.as("not-global"), builder, storePrefix);
         builder.table("not-global", consumed, materializedInternalNotGlobal);
 
         final KeyValueMapper<String, String, String> kvMapper = (key, value) -> value;
@@ -257,14 +249,14 @@ public class InternalStreamsBuilderTest {
         final KStream<String, String> playEvents = builder.stream(Collections.singleton("events"), consumed);
 
         final MaterializedInternal<String, String, KeyValueStore<Bytes, byte[]>> materializedInternal =
-            new MaterializedInternal<>(Materialized.as("table-store"));
-        materializedInternal.generateStoreNameIfNeeded(builder, storePrefix);
+            new MaterializedInternal<>(Materialized.as("table-store"), builder, storePrefix);
         final KTable<String, String> table = builder.table("table-topic", consumed, materializedInternal);
 
 
         final KStream<String, String> mapped = playEvents.map(MockMapper.<String, String>selectValueKeyValueMapper());
-        mapped.leftJoin(table, MockValueJoiner.TOSTRING_JOINER).groupByKey().count(Materialized.<String, Long, KeyValueStore<Bytes, byte[]>>as("count"));
+        mapped.leftJoin(table, MockValueJoiner.TOSTRING_JOINER).groupByKey().count(Materialized.as("count"));
         builder.buildAndOptimizeTopology();
+        builder.internalTopologyBuilder.rewriteTopology(new StreamsConfig(StreamsTestUtils.getStreamsConfig(APP_ID)));
         assertEquals(Collections.singletonList("table-topic"), builder.internalTopologyBuilder.stateStoreNameToSourceTopics().get("table-store"));
         assertEquals(Collections.singletonList(APP_ID + "-KSTREAM-MAP-0000000003-repartition"), builder.internalTopologyBuilder.stateStoreNameToSourceTopics().get("count"));
     }
@@ -359,6 +351,7 @@ public class InternalStreamsBuilderTest {
     public void shouldHaveNullTimestampExtractorWhenNoneSupplied() {
         builder.stream(Collections.singleton("topic"), consumed);
         builder.buildAndOptimizeTopology();
+        builder.internalTopologyBuilder.rewriteTopology(new StreamsConfig(StreamsTestUtils.getStreamsConfig(APP_ID)));
         final ProcessorTopology processorTopology = builder.internalTopologyBuilder.build(null);
         assertNull(processorTopology.source("topic").getTimestampExtractor());
     }
@@ -368,7 +361,9 @@ public class InternalStreamsBuilderTest {
         final ConsumedInternal consumed = new ConsumedInternal<>(Consumed.with(new MockTimestampExtractor()));
         builder.stream(Collections.singleton("topic"), consumed);
         builder.buildAndOptimizeTopology();
-        final ProcessorTopology processorTopology = builder.internalTopologyBuilder.build(null);
+        final ProcessorTopology processorTopology = builder.internalTopologyBuilder
+            .rewriteTopology(new StreamsConfig(StreamsTestUtils.getStreamsConfig(APP_ID)))
+            .build(null);
         assertThat(processorTopology.source("topic").getTimestampExtractor(), instanceOf(MockTimestampExtractor.class));
     }
 
@@ -376,7 +371,9 @@ public class InternalStreamsBuilderTest {
     public void ktableShouldHaveNullTimestampExtractorWhenNoneSupplied() {
         builder.table("topic", consumed, materialized);
         builder.buildAndOptimizeTopology();
-        final ProcessorTopology processorTopology = builder.internalTopologyBuilder.build(null);
+        final ProcessorTopology processorTopology = builder.internalTopologyBuilder
+            .rewriteTopology(new StreamsConfig(StreamsTestUtils.getStreamsConfig(APP_ID)))
+            .build(null);
         assertNull(processorTopology.source("topic").getTimestampExtractor());
     }
 
@@ -385,7 +382,9 @@ public class InternalStreamsBuilderTest {
         final ConsumedInternal<String, String> consumed = new ConsumedInternal<>(Consumed.<String, String>with(new MockTimestampExtractor()));
         builder.table("topic", consumed, materialized);
         builder.buildAndOptimizeTopology();
-        final ProcessorTopology processorTopology = builder.internalTopologyBuilder.build(null);
+        final ProcessorTopology processorTopology = builder.internalTopologyBuilder
+            .rewriteTopology(new StreamsConfig(StreamsTestUtils.getStreamsConfig(APP_ID)))
+            .build(null);
         assertThat(processorTopology.source("topic").getTimestampExtractor(), instanceOf(MockTimestampExtractor.class));
     }
 

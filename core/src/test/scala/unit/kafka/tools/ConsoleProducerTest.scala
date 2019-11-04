@@ -23,6 +23,7 @@ import ConsoleProducer.LineMessageReader
 import org.apache.kafka.clients.producer.ProducerConfig
 import org.junit.{Assert, Test}
 import Assert.assertEquals
+import kafka.utils.Exit
 
 class ConsoleProducerTest {
 
@@ -43,27 +44,27 @@ class ConsoleProducerTest {
   )
 
   @Test
-  def testValidConfigs() {
+  def testValidConfigs(): Unit = {
     val config = new ConsoleProducer.ProducerConfig(validArgs)
     val producerConfig = new ProducerConfig(ConsoleProducer.producerProps(config))
     assertEquals(util.Arrays.asList("localhost:1001", "localhost:1002"),
       producerConfig.getList(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG))
   }
 
-  @Test
-  def testInvalidConfigs() {
+  @Test(expected = classOf[IllegalArgumentException])
+  def testInvalidConfigs(): Unit = {
+    Exit.setExitProcedure((_, message) => throw new IllegalArgumentException(message.orNull))
     try {
       new ConsoleProducer.ProducerConfig(invalidArgs)
-      Assert.fail("Should have thrown an UnrecognizedOptionException")
-    } catch {
-      case _: joptsimple.OptionException => // expected exception
+    } finally {
+      Exit.resetExitProcedure()
     }
   }
 
   @Test
   def testParseKeyProp(): Unit = {
     val config = new ConsoleProducer.ProducerConfig(validArgs)
-    val reader = Class.forName(config.readerClass).newInstance().asInstanceOf[LineMessageReader]
+    val reader = Class.forName(config.readerClass).getDeclaredConstructor().newInstance().asInstanceOf[LineMessageReader]
     reader.init(System.in,ConsoleProducer.getReaderProps(config))
     assert(reader.keySeparator == "#")
     assert(reader.parseKey)

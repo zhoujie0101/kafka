@@ -19,8 +19,8 @@ package org.apache.kafka.clients.admin.internals;
 
 import org.apache.kafka.clients.MetadataUpdater;
 import org.apache.kafka.common.Cluster;
+import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.Node;
-import org.apache.kafka.common.PartitionInfo;
 import org.apache.kafka.common.errors.AuthenticationException;
 import org.apache.kafka.common.requests.MetadataResponse;
 import org.apache.kafka.common.requests.RequestHeader;
@@ -105,7 +105,7 @@ public class AdminMetadataManager {
         }
 
         @Override
-        public void handleAuthenticationFailure(AuthenticationException e) {
+        public void handleFatalException(KafkaException e) {
             updateFailed(e);
         }
 
@@ -183,9 +183,9 @@ public class AdminMetadataManager {
             log.trace("Clearing cached controller node {}.", cluster.controller());
             this.cluster = new Cluster(cluster.clusterResource().clusterId(),
                 cluster.nodes(),
-                Collections.<PartitionInfo>emptySet(),
-                Collections.<String>emptySet(),
-                Collections.<String>emptySet(),
+                Collections.emptySet(),
+                Collections.emptySet(),
+                Collections.emptySet(),
                 null);
         }
     }

@@ -21,9 +21,9 @@ package org.apache.kafka.streams.scala
 package kstream
 
 import org.apache.kafka.common.utils.Bytes
-import org.apache.kafka.streams.kstream.{KTable => KTableJ, _}
+import org.apache.kafka.streams.kstream.{ValueJoiner, ValueTransformerWithKeySupplier, KTable => KTableJ}
+import org.apache.kafka.streams.scala.FunctionsCompatConversions._
 import org.apache.kafka.streams.scala.ImplicitConversions._
-import org.apache.kafka.streams.scala.FunctionConversions._
 import org.apache.kafka.streams.state.KeyValueStore
 
 /**
@@ -46,7 +46,7 @@ class KTable[K, V](val inner: KTableJ[K, V]) {
    * @see `org.apache.kafka.streams.kstream.KTable#filter`
    */
   def filter(predicate: (K, V) => Boolean): KTable[K, V] =
-    inner.filter(predicate(_, _))
+    inner.filter(predicate.asPredicate)
 
   /**
    * Create a new [[KTable]] that consists all records of this [[KTable]] which satisfies the given
@@ -70,7 +70,7 @@ class KTable[K, V](val inner: KTableJ[K, V]) {
    * @see `org.apache.kafka.streams.kstream.KTable#filterNot`
    */
   def filterNot(predicate: (K, V) => Boolean): KTable[K, V] =
-    inner.filterNot(predicate(_, _))
+    inner.filterNot(predicate.asPredicate)
 
   /**
    * Create a new [[KTable]] that consists all records of this [[KTable]] which do <em>not</em> satisfy the given
@@ -160,6 +160,18 @@ class KTable[K, V](val inner: KTableJ[K, V]) {
     inner.toStream[KR](mapper.asKeyValueMapper)
 
   /**
+   * Suppress some updates from this changelog stream, determined by the supplied [[Suppressed]] configuration.
+   *
+   * This controls what updates downstream table and stream operations will receive.
+   *
+   * @param suppressed Configuration object determining what, if any, updates to suppress.
+   * @return A new KTable with the desired suppression characteristics.
+   * @see `org.apache.kafka.streams.kstream.KTable#suppress`
+   */
+  def suppress(suppressed: org.apache.kafka.streams.kstream.Suppressed[_ >: K]): KTable[K, V] =
+    inner.suppress(suppressed)
+
+  /**
    * Create a new `KTable` by transforming the value of each record in this `KTable` into a new value, (with possibly new type).
    * Transform the value of each input record into a new value (with possible new type) of the output record.
    * A `ValueTransformerWithKey` (provided by the given `ValueTransformerWithKeySupplier`) is applied to each input
@@ -212,15 +224,15 @@ class KTable[K, V](val inner: KTableJ[K, V]) {
 
   /**
    * Re-groups the records of this [[KTable]] using the provided key/value mapper
-   * and `Serde`s as specified by `Serialized`.
+   * and `Serde`s as specified by `Grouped`.
    *
    * @param selector      a function that computes a new grouping key and value to be aggregated
-   * @param serialized    the `Serialized` instance used to specify `Serdes`
+   * @param grouped       the `Grouped` instance used to specify `Serdes`
    * @return a [[KGroupedTable]] that contains the re-grouped records of the original [[KTable]]
    * @see `org.apache.kafka.streams.kstream.KTable#groupBy`
    */
-  def groupBy[KR, VR](selector: (K, V) => (KR, VR))(implicit serialized: Serialized[KR, VR]): KGroupedTable[KR, VR] =
-    inner.groupBy(selector.asKeyValueMapper, serialized)
+  def groupBy[KR, VR](selector: (K, V) => (KR, VR))(implicit grouped: Grouped[KR, VR]): KGroupedTable[KR, VR] =
+    inner.groupBy(selector.asKeyValueMapper, grouped)
 
   /**
    * Join records of this [[KTable]] with another [[KTable]]'s records using non-windowed inner equi join.
@@ -245,9 +257,8 @@ class KTable[K, V](val inner: KTableJ[K, V]) {
    * one for each matched record-pair with the same key
    * @see `org.apache.kafka.streams.kstream.KTable#join`
    */
-  def join[VO, VR](other: KTable[K, VO])(
-    joiner: (V, VO) => VR,
-    materialized: Materialized[K, VR, ByteArrayKeyValueStore]
+  def join[VO, VR](other: KTable[K, VO], materialized: Materialized[K, VR, ByteArrayKeyValueStore])(
+    joiner: (V, VO) => VR
   ): KTable[K, VR] =
     inner.join[VO, VR](other.inner, joiner.asValueJoiner, materialized)
 
@@ -274,9 +285,8 @@ class KTable[K, V](val inner: KTableJ[K, V]) {
    * one for each matched record-pair with the same key
    * @see `org.apache.kafka.streams.kstream.KTable#leftJoin`
    */
-  def leftJoin[VO, VR](other: KTable[K, VO])(
-    joiner: (V, VO) => VR,
-    materialized: Materialized[K, VR, ByteArrayKeyValueStore]
+  def leftJoin[VO, VR](other: KTable[K, VO], materialized: Materialized[K, VR, ByteArrayKeyValueStore])(
+    joiner: (V, VO) => VR
   ): KTable[K, VR] =
     inner.leftJoin[VO, VR](other.inner, joiner.asValueJoiner, materialized)
 
@@ -303,11 +313,46 @@ class KTable[K, V](val inner: KTableJ[K, V]) {
    * one for each matched record-pair with the same key
    * @see `org.apache.kafka.streams.kstream.KTable#leftJoin`
    */
-  def outerJoin[VO, VR](other: KTable[K, VO])(
-    joiner: (V, VO) => VR,
-    materialized: Materialized[K, VR, ByteArrayKeyValueStore]
+  def outerJoin[VO, VR](other: KTable[K, VO], materialized: Materialized[K, VR, ByteArrayKeyValueStore])(
+    joiner: (V, VO) => VR
   ): KTable[K, VR] =
     inner.outerJoin[VO, VR](other.inner, joiner.asValueJoiner, materialized)
+
+  /**
+   * Join records of this [[KTable]] with another [[KTable]]'s records using non-windowed inner join. Records from this
+   * table are joined according to the result of keyExtractor on the other KTable.
+   *
+   * @param other the other [[KTable]] to be joined with this [[KTable]], keyed on the value obtained from keyExtractor
+   * @param keyExtractor a function that extracts the foreign key from this table's value
+   * @param joiner       a function that computes the join result for a pair of matching records
+   * @param materialized a `Materialized` that describes how the `StateStore` for the resulting [[KTable]]
+   * should be materialized.
+   * @return a [[KTable]] that contains join-records for each key and values computed by the given joiner,
+   * one for each matched record-pair with the same key
+   */
+  def join[VR, KO, VO](other: KTable[KO, VO],
+                       keyExtractor: Function[V, KO],
+                       joiner: ValueJoiner[V, VO, VR],
+                       materialized: Materialized[K, VR, KeyValueStore[Bytes, Array[Byte]]]): KTable[K, VR] =
+    inner.join(other.inner, keyExtractor.asJavaFunction, joiner, materialized)
+
+  /**
+   * Join records of this [[KTable]] with another [[KTable]]'s records using non-windowed left join. Records from this
+   * table are joined according to the result of keyExtractor on the other KTable.
+   *
+   * @param other the other [[KTable]] to be joined with this [[KTable]], keyed on the value obtained from keyExtractor
+   * @param keyExtractor a function that extracts the foreign key from this table's value
+   * @param joiner       a function that computes the join result for a pair of matching records
+   * @param materialized a `Materialized` that describes how the `StateStore` for the resulting [[KTable]]
+   * should be materialized.
+   * @return a [[KTable]] that contains join-records for each key and values computed by the given joiner,
+   * one for each matched record-pair with the same key
+   */
+  def leftJoin[VR, KO, VO](other: KTable[KO, VO],
+                           keyExtractor: Function[V, KO],
+                           joiner: ValueJoiner[V, VO, VR],
+                           materialized: Materialized[K, VR, KeyValueStore[Bytes, Array[Byte]]]): KTable[K, VR] =
+    inner.leftJoin(other.inner, keyExtractor.asJavaFunction, joiner, materialized)
 
   /**
    * Get the name of the local state store used that can be used to query this [[KTable]].

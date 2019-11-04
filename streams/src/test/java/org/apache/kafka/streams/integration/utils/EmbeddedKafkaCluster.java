@@ -35,6 +35,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
 
@@ -93,6 +94,7 @@ public class EmbeddedKafkaCluster extends ExternalResource {
         putIfAbsent(brokerConfig, KafkaConfig$.MODULE$.GroupMinSessionTimeoutMsProp(), 0);
         putIfAbsent(brokerConfig, KafkaConfig$.MODULE$.GroupInitialRebalanceDelayMsProp(), 0);
         putIfAbsent(brokerConfig, KafkaConfig$.MODULE$.OffsetsTopicReplicationFactorProp(), (short) 1);
+        putIfAbsent(brokerConfig, KafkaConfig$.MODULE$.OffsetsTopicPartitionsProp(), 5);
         putIfAbsent(brokerConfig, KafkaConfig$.MODULE$.AutoCreateTopicsEnableProp(), true);
 
         for (int i = 0; i < brokers.length; i++) {
@@ -157,7 +159,7 @@ public class EmbeddedKafkaCluster extends ExternalResource {
      */
     public void createTopics(final String... topics) throws InterruptedException {
         for (final String topic : topics) {
-            createTopic(topic, 1, 1, new Properties());
+            createTopic(topic, 1, 1, Collections.emptyMap());
         }
     }
 
@@ -167,7 +169,7 @@ public class EmbeddedKafkaCluster extends ExternalResource {
      * @param topic The name of the topic.
      */
     public void createTopic(final String topic) throws InterruptedException {
-        createTopic(topic, 1, 1, new Properties());
+        createTopic(topic, 1, 1, Collections.emptyMap());
     }
 
     /**
@@ -178,7 +180,7 @@ public class EmbeddedKafkaCluster extends ExternalResource {
      * @param replication The replication factor for (the partitions of) this topic.
      */
     public void createTopic(final String topic, final int partitions, final int replication) throws InterruptedException {
-        createTopic(topic, partitions, replication, new Properties());
+        createTopic(topic, partitions, replication, Collections.emptyMap());
     }
 
     /**
@@ -192,7 +194,7 @@ public class EmbeddedKafkaCluster extends ExternalResource {
     public void createTopic(final String topic,
                             final int partitions,
                             final int replication,
-                            final Properties topicConfig) throws InterruptedException {
+                            final Map<String, String> topicConfig) throws InterruptedException {
         brokers[0].createTopic(topic, partitions, replication, topicConfig);
         final List<TopicPartition> topicPartitions = new ArrayList<>();
         for (int partition = 0; partition < partitions; partition++) {
@@ -271,7 +273,7 @@ public class EmbeddedKafkaCluster extends ExternalResource {
      * @param timeoutMs the max time to wait for the topics to be deleted (does not block if {@code <= 0})
      */
     public void deleteAllTopicsAndWait(final long timeoutMs) throws InterruptedException {
-        final List<String> topics = JavaConverters.seqAsJavaListConverter(brokers[0].kafkaServer().zkClient().getAllTopicsInCluster()).asJava();
+        final Set<String> topics = JavaConverters.setAsJavaSetConverter(brokers[0].kafkaServer().zkClient().getAllTopicsInCluster()).asJava();
         for (final String topic : topics) {
             try {
                 brokers[0].deleteTopic(topic);
@@ -311,7 +313,7 @@ public class EmbeddedKafkaCluster extends ExternalResource {
         @Override
         public boolean conditionMet() {
             final Set<String> allTopics = new HashSet<>(
-                    JavaConverters.seqAsJavaListConverter(brokers[0].kafkaServer().zkClient().getAllTopicsInCluster()).asJava());
+                    JavaConverters.setAsJavaSetConverter(brokers[0].kafkaServer().zkClient().getAllTopicsInCluster()).asJava());
             return !allTopics.removeAll(deletedTopics);
         }
     }
@@ -325,8 +327,7 @@ public class EmbeddedKafkaCluster extends ExternalResource {
 
         @Override
         public boolean conditionMet() {
-            final Set<String> allTopics = new HashSet<>(
-                    JavaConverters.seqAsJavaListConverter(brokers[0].kafkaServer().zkClient().getAllTopicsInCluster()).asJava());
+            final Set<String> allTopics = JavaConverters.setAsJavaSetConverter(brokers[0].kafkaServer().zkClient().getAllTopicsInCluster()).asJava();
             return allTopics.equals(remainingTopics);
         }
     }

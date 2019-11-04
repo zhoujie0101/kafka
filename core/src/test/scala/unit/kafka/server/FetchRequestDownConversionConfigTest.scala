@@ -17,7 +17,7 @@
 package kafka.server
 
 import java.util
-import java.util.Properties
+import java.util.{Optional, Properties}
 
 import kafka.log.LogConfig
 import kafka.utils.TestUtils
@@ -32,7 +32,7 @@ import org.junit.Test
 
 class FetchRequestDownConversionConfigTest extends BaseRequestTest {
   private var producer: KafkaProducer[String, String] = null
-  override def numBrokers: Int = 1
+  override def brokerCount: Int = 1
 
   override def setUp(): Unit = {
     super.setUp()
@@ -45,8 +45,8 @@ class FetchRequestDownConversionConfigTest extends BaseRequestTest {
     super.tearDown()
   }
 
-  override protected def propertyOverrides(properties: Properties): Unit = {
-    super.propertyOverrides(properties)
+  override protected def brokerPropertyOverrides(properties: Properties): Unit = {
+    super.brokerPropertyOverrides(properties)
     properties.put(KafkaConfig.LogMessageDownConversionEnableProp, "false")
   }
 
@@ -72,7 +72,8 @@ class FetchRequestDownConversionConfigTest extends BaseRequestTest {
                                  offsetMap: Map[TopicPartition, Long] = Map.empty): util.LinkedHashMap[TopicPartition, FetchRequest.PartitionData] = {
     val partitionMap = new util.LinkedHashMap[TopicPartition, FetchRequest.PartitionData]
     topicPartitions.foreach { tp =>
-      partitionMap.put(tp, new FetchRequest.PartitionData(offsetMap.getOrElse(tp, 0), 0L, maxPartitionBytes))
+      partitionMap.put(tp, new FetchRequest.PartitionData(offsetMap.getOrElse(tp, 0), 0L,
+        maxPartitionBytes, Optional.empty()))
     }
     partitionMap
   }

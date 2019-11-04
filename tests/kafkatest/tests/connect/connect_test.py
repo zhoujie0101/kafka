@@ -22,8 +22,7 @@ from ducktape.errors import TimeoutError
 
 from kafkatest.services.zookeeper import ZookeeperService
 from kafkatest.services.kafka import KafkaService
-from kafkatest.services.connect import ConnectStandaloneService
-from kafkatest.services.connect import ErrorTolerance
+from kafkatest.services.connect import ConnectServiceBase, ConnectStandaloneService, ErrorTolerance
 from kafkatest.services.console_consumer import ConsoleConsumer
 from kafkatest.services.security.security_config import SecurityConfig
 
@@ -47,7 +46,7 @@ class ConnectStandaloneFileTest(Test):
 
     OFFSETS_FILE = "/mnt/connect.offsets"
 
-    TOPIC = "${file:/mnt/connect/connect-file-external.properties:topic.external}"
+    TOPIC = "${file:%s:topic.external}" % ConnectServiceBase.EXTERNAL_CONFIGS_FILE
     TOPIC_TEST = "test"
 
     FIRST_INPUT_LIST = ["foo", "bar", "baz"]
@@ -100,13 +99,11 @@ class ConnectStandaloneFileTest(Test):
         self.zk.start()
         self.kafka.start()
 
-        source_external_props = os.path.join(self.source.PERSISTENT_ROOT, "connect-file-external.properties")
-        self.source.node.account.create_file(source_external_props, self.render('connect-file-external.properties'))
         self.source.set_configs(lambda node: self.render("connect-standalone.properties", node=node), [self.render("connect-file-source.properties")])
-
-        sink_external_props = os.path.join(self.sink.PERSISTENT_ROOT, "connect-file-external.properties")
-        self.sink.node.account.create_file(sink_external_props, self.render('connect-file-external.properties'))
         self.sink.set_configs(lambda node: self.render("connect-standalone.properties", node=node), [self.render("connect-file-sink.properties")])
+
+        self.source.set_external_configs(lambda node: self.render("connect-file-external.properties", node=node))
+        self.sink.set_external_configs(lambda node: self.render("connect-file-external.properties", node=node))
 
         self.source.start()
         self.sink.start()
@@ -181,6 +178,9 @@ class ConnectStandaloneFileTest(Test):
         self.override_key_converter_schemas_enable = False
         self.override_value_converter_schemas_enable = False
         self.sink.set_configs(lambda node: self.render("connect-standalone.properties", node=node), [self.render("connect-file-sink.properties")])
+
+        self.source.set_external_configs(lambda node: self.render("connect-file-external.properties", node=node))
+        self.sink.set_external_configs(lambda node: self.render("connect-file-external.properties", node=node))
 
         self.source.start()
         self.sink.start()

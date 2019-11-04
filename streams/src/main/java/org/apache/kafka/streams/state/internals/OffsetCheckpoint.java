@@ -18,6 +18,8 @@ package org.apache.kafka.streams.state.internals;
 
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.utils.Utils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
@@ -32,6 +34,7 @@ import java.nio.file.NoSuchFileException;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.regex.Pattern;
 
 /**
  * This class saves out a map of topic/partition=&gt;offsets to a file. The format of the file is UTF-8 text containing the following:
@@ -49,6 +52,9 @@ import java.util.Map;
  *   separated by spaces.
  */
 public class OffsetCheckpoint {
+    private static final Logger LOG = LoggerFactory.getLogger(OffsetCheckpoint.class);
+
+    private static final Pattern WHITESPACE_MINIMUM_ONCE = Pattern.compile("\\s+");
 
     private static final int VERSION = 0;
 
@@ -72,6 +78,7 @@ public class OffsetCheckpoint {
         synchronized (lock) {
             // write to temp file and then swap with the existing file
             final File temp = new File(file.getAbsolutePath() + ".tmp");
+            LOG.trace("Writing tmp checkpoint file {}", temp.getAbsolutePath());
 
             final FileOutputStream fileOutputStream = new FileOutputStream(temp);
             try (final BufferedWriter writer = new BufferedWriter(
@@ -87,6 +94,7 @@ public class OffsetCheckpoint {
                 fileOutputStream.getFD().sync();
             }
 
+            LOG.trace("Swapping tmp checkpoint file {} {}", temp.toPath(), file.toPath());
             Utils.atomicMoveWithFallback(temp.toPath(), file.toPath());
         }
     }
@@ -129,7 +137,7 @@ public class OffsetCheckpoint {
                         final Map<TopicPartition, Long> offsets = new HashMap<>();
                         String line = reader.readLine();
                         while (line != null) {
-                            final String[] pieces = line.split("\\s+");
+                            final String[] pieces = WHITESPACE_MINIMUM_ONCE.split(line);
                             if (pieces.length != 3) {
                                 throw new IOException(
                                     String.format("Malformed line in offset checkpoint file: '%s'.", line));

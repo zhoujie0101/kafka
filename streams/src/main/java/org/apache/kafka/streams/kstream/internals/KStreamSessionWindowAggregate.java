@@ -16,26 +16,32 @@
  */
 package org.apache.kafka.streams.kstream.internals;
 
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.common.metrics.Sensor;
 import org.apache.kafka.streams.KeyValue;
-import org.apache.kafka.streams.errors.ProcessorStateException;
 import org.apache.kafka.streams.kstream.Aggregator;
 import org.apache.kafka.streams.kstream.Initializer;
 import org.apache.kafka.streams.kstream.Merger;
 import org.apache.kafka.streams.kstream.SessionWindows;
 import org.apache.kafka.streams.kstream.Windowed;
+import org.apache.kafka.streams.kstream.internals.metrics.Sensors;
 import org.apache.kafka.streams.processor.AbstractProcessor;
 import org.apache.kafka.streams.processor.Processor;
 import org.apache.kafka.streams.processor.ProcessorContext;
+import org.apache.kafka.streams.processor.internals.InternalProcessorContext;
 import org.apache.kafka.streams.processor.internals.metrics.StreamsMetricsImpl;
 import org.apache.kafka.streams.state.KeyValueIterator;
 import org.apache.kafka.streams.state.SessionStore;
+import org.apache.kafka.streams.state.ValueAndTimestamp;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.List;
 
-class KStreamSessionWindowAggregate<K, V, Agg> implements KStreamAggProcessorSupplier<K, Windowed<K>, V, Agg> {
+import static org.apache.kafka.streams.processor.internals.metrics.TaskMetrics.droppedRecordsSensorOrSkippedRecordsSensor;
+
+public class KStreamSessionWindowAggregate<K, V, Agg> implements KStreamAggProcessorSupplier<K, Windowed<K>, V, Agg> {
     private static final Logger LOG = LoggerFactory.getLogger(KStreamSessionWindowAggregate.class);
 
     private final String storeName;
@@ -46,11 +52,11 @@ class KStreamSessionWindowAggregate<K, V, Agg> implements KStreamAggProcessorSup
 
     private boolean sendOldValues = false;
 
-    KStreamSessionWindowAggregate(final SessionWindows windows,
-                                  final String storeName,
-                                  final Initializer<Agg> initializer,
-                                  final Aggregator<? super K, ? super V, Agg> aggregator,
-                                  final Merger<? super K, Agg> sessionMerger) {
+    public KStreamSessionWindowAggregate(final SessionWindows windows,
+                                         final String storeName,
+                                         final Initializer<Agg> initializer,
+                                         final Aggregator<? super K, ? super V, Agg> aggregator,
+                                         final Merger<? super K, Agg> sessionMerger) {
         this.windows = windows;
         this.storeName = storeName;
         this.initializer = initializer;
@@ -63,6 +69,10 @@ class KStreamSessionWindowAggregate<K, V, Agg> implements KStreamAggProcessorSup
         return new KStreamSessionWindowAggregateProcessor();
     }
 
+    public SessionWindows windows() {
+        return windows;
+    }
+
     @Override
     public void enableSendingOldValues() {
         sendOldValues = true;
@@ -71,16 +81,23 @@ class KStreamSessionWindowAggregate<K, V, Agg> implements KStreamAggProcessorSup
     private class KStreamSessionWindowAggregateProcessor extends AbstractProcessor<K, V> {
 
         private SessionStore<K, Agg> store;
-        private TupleForwarder<Windowed<K>, Agg> tupleForwarder;
+        private SessionTupleForwarder<K, Agg> tupleForwarder;
         private StreamsMetricsImpl metrics;
+        private InternalProcessorContext internalProcessorContext;
+        private Sensor lateRecordDropSensor;
+        private Sensor droppedRecordsSensor;
+        private long observedStreamTime = ConsumerRecord.NO_TIMESTAMP;
 
         @SuppressWarnings("unchecked")
         @Override
         public void init(final ProcessorContext context) {
             super.init(context);
+            internalProcessorContext = (InternalProcessorContext) context;
             metrics = (StreamsMetricsImpl) context.metrics();
+            lateRecordDropSensor = Sensors.lateRecordDropSensor(internalProcessorContext);
+            droppedRecordsSensor = droppedRecordsSensorOrSkippedRecordsSensor(Thread.currentThread().getName(), context.taskId().toString(), metrics);
             store = (SessionStore<K, Agg>) context.getStateStore(storeName);
-            tupleForwarder = new TupleForwarder<>(store, context, new ForwardingCacheFlushListener<K, V>(context, sendOldValues), sendOldValues);
+            tupleForwarder = new SessionTupleForwarder<>(store, context, new SessionCacheFlushListener<>(context), sendOldValues);
         }
 
         @Override
@@ -92,11 +109,14 @@ class KStreamSessionWindowAggregate<K, V, Agg> implements KStreamAggProcessorSup
                     "Skipping record due to null key. value=[{}] topic=[{}] partition=[{}] offset=[{}]",
                     value, context().topic(), context().partition(), context().offset()
                 );
-                metrics.skippedRecordsSensor().record();
+                droppedRecordsSensor.record();
                 return;
             }
 
             final long timestamp = context().timestamp();
+            observedStreamTime = Math.max(observedStreamTime, timestamp);
+            final long closeTime = observedStreamTime - windows.gracePeriodMs();
+
             final List<KeyValue<Windowed<K>, Agg>> merged = new ArrayList<>();
             final SessionWindow newSessionWindow = new SessionWindow(timestamp, timestamp);
             SessionWindow mergedWindow = newSessionWindow;
@@ -117,20 +137,43 @@ class KStreamSessionWindowAggregate<K, V, Agg> implements KStreamAggProcessorSup
                 }
             }
 
-            agg = aggregator.apply(key, value, agg);
-            final Windowed<K> sessionKey = new Windowed<>(key, mergedWindow);
-            if (!mergedWindow.equals(newSessionWindow)) {
-                for (final KeyValue<Windowed<K>, Agg> session : merged) {
-                    store.remove(session.key);
-                    tupleForwarder.maybeForward(session.key, null, session.value);
+            if (mergedWindow.end() < closeTime) {
+                LOG.debug(
+                    "Skipping record for expired window. " +
+                        "key=[{}] " +
+                        "topic=[{}] " +
+                        "partition=[{}] " +
+                        "offset=[{}] " +
+                        "timestamp=[{}] " +
+                        "window=[{},{}] " +
+                        "expiration=[{}] " +
+                        "streamTime=[{}]",
+                    key,
+                    context().topic(),
+                    context().partition(),
+                    context().offset(),
+                    timestamp,
+                    mergedWindow.start(),
+                    mergedWindow.end(),
+                    closeTime,
+                    observedStreamTime
+                );
+                lateRecordDropSensor.record();
+            } else {
+                if (!mergedWindow.equals(newSessionWindow)) {
+                    for (final KeyValue<Windowed<K>, Agg> session : merged) {
+                        store.remove(session.key);
+                        tupleForwarder.maybeForward(session.key, null, sendOldValues ? session.value : null);
+                    }
                 }
+
+                agg = aggregator.apply(key, value, agg);
+                final Windowed<K> sessionKey = new Windowed<>(key, mergedWindow);
+                store.put(sessionKey, agg);
+                tupleForwarder.maybeForward(sessionKey, agg, null);
             }
-            store.put(sessionKey, agg);
-            tupleForwarder.maybeForward(sessionKey, agg, null);
         }
-
     }
-
 
     private SessionWindow mergeSessionWindow(final SessionWindow one, final SessionWindow two) {
         final long start = one.start() < two.start() ? one.start() : two.start();
@@ -163,17 +206,10 @@ class KStreamSessionWindowAggregate<K, V, Agg> implements KStreamAggProcessorSup
         }
 
         @Override
-        public Agg get(final Windowed<K> key) {
-            try (final KeyValueIterator<Windowed<K>, Agg> iter = store.findSessions(key.key(), key.window().end(), key.window().end())) {
-                if (!iter.hasNext()) {
-                    return null;
-                }
-                final Agg value = iter.next().value;
-                if (iter.hasNext()) {
-                    throw new ProcessorStateException(String.format("Iterator for key [%s] on session store has more than one value", key));
-                }
-                return value;
-            }
+        public ValueAndTimestamp<Agg> get(final Windowed<K> key) {
+            return ValueAndTimestamp.make(
+                store.fetchSession(key.key(), key.window().start(), key.window().end()),
+                key.window().end());
         }
 
         @Override

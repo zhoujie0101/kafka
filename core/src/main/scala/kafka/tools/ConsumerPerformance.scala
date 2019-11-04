@@ -17,22 +17,20 @@
 
 package kafka.tools
 
+import java.text.SimpleDateFormat
+import java.time.Duration
 import java.util
-
-import scala.collection.JavaConverters._
 import java.util.concurrent.atomic.AtomicLong
+import java.util.{Properties, Random}
 
+import com.typesafe.scalalogging.LazyLogging
+import kafka.utils.{CommandLineUtils, ToolsUtils}
 import org.apache.kafka.clients.consumer.{ConsumerRebalanceListener, KafkaConsumer}
 import org.apache.kafka.common.serialization.ByteArrayDeserializer
 import org.apache.kafka.common.utils.Utils
 import org.apache.kafka.common.{Metric, MetricName, TopicPartition}
-import kafka.utils.{CommandLineUtils, ToolsUtils}
-import java.util.{Collections, Properties, Random}
-import java.text.SimpleDateFormat
-import java.time.Duration
 
-import com.typesafe.scalalogging.LazyLogging
-
+import scala.collection.JavaConverters._
 import scala.collection.mutable
 
 /**
@@ -54,7 +52,6 @@ object ConsumerPerformance extends LazyLogging {
 
     var startMs, endMs = 0L
     val consumer = new KafkaConsumer[Array[Byte], Array[Byte]](config.props)
-    consumer.subscribe(Collections.singletonList(config.topic))
     startMs = System.currentTimeMillis
     consume(consumer, List(config.topic), config.numMessages, config.recordFetchTimeoutMs, config, totalMessagesRead, totalBytesRead, joinGroupTimeInMs, startMs)
     endMs = System.currentTimeMillis
@@ -103,7 +100,7 @@ object ConsumerPerformance extends LazyLogging {
               totalMessagesRead: AtomicLong,
               totalBytesRead: AtomicLong,
               joinTime: AtomicLong,
-              testStartTime: Long) {
+              testStartTime: Long): Unit = {
     var bytesRead = 0L
     var messagesRead = 0L
     var lastBytesRead = 0L
@@ -112,19 +109,18 @@ object ConsumerPerformance extends LazyLogging {
     var joinTimeMsInSingleRound = 0L
 
     consumer.subscribe(topics.asJava, new ConsumerRebalanceListener {
-      def onPartitionsAssigned(partitions: util.Collection[TopicPartition]) {
+      def onPartitionsAssigned(partitions: util.Collection[TopicPartition]): Unit = {
         joinTime.addAndGet(System.currentTimeMillis - joinStart)
         joinTimeMsInSingleRound += System.currentTimeMillis - joinStart
       }
-      def onPartitionsRevoked(partitions: util.Collection[TopicPartition]) {
+      def onPartitionsRevoked(partitions: util.Collection[TopicPartition]): Unit = {
         joinStart = System.currentTimeMillis
       }})
 
     // Now start the benchmark
-    val startMs = System.currentTimeMillis
-    var lastReportTime: Long = startMs
-    var lastConsumedTime = System.currentTimeMillis
-    var currentTimeMillis = lastConsumedTime
+    var currentTimeMillis = System.currentTimeMillis
+    var lastReportTime: Long = currentTimeMillis
+    var lastConsumedTime = currentTimeMillis
 
     while (messagesRead < count && currentTimeMillis - lastConsumedTime <= timeout) {
       val records = consumer.poll(Duration.ofMillis(100)).asScala
@@ -254,7 +250,9 @@ object ConsumerPerformance extends LazyLogging {
       .ofType(classOf[Long])
       .defaultsTo(10000)
 
-    val options = parser.parse(args: _*)
+    options = parser.parse(args: _*)
+
+    CommandLineUtils.printHelpAndExitIfNeeded(this, "This tool helps in performance test for the full zookeeper consumer")
 
     CommandLineUtils.checkRequiredArgs(parser, options, topicOpt, numMessagesOpt, bootstrapServersOpt)
 

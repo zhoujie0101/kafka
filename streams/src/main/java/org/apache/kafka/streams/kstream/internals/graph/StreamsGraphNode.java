@@ -29,22 +29,21 @@ public abstract class StreamsGraphNode {
     private final Collection<StreamsGraphNode> childNodes = new LinkedHashSet<>();
     private final Collection<StreamsGraphNode> parentNodes = new LinkedHashSet<>();
     private final String nodeName;
-    private final boolean repartitionRequired;
     private boolean keyChangingOperation;
-    private Integer id;
+    private boolean valueChangingOperation;
+    private boolean mergeNode;
+    private Integer buildPriority;
     private boolean hasWrittenToTopology = false;
 
-    public StreamsGraphNode(final String nodeName,
-                            final boolean repartitionRequired) {
+    public StreamsGraphNode(final String nodeName) {
         this.nodeName = nodeName;
-        this.repartitionRequired = repartitionRequired;
     }
 
     public Collection<StreamsGraphNode> parentNodes() {
         return parentNodes;
     }
 
-    public String[] parentNodeNames() {
+    String[] parentNodeNames() {
         final String[] parentNames = new String[parentNodes.size()];
         int index = 0;
         for (final StreamsGraphNode parentNode : parentNodes) {
@@ -62,41 +61,60 @@ public abstract class StreamsGraphNode {
         return true;
     }
 
-    public void addParentNode(final StreamsGraphNode parentNode) {
-        parentNodes.add(parentNode);
-    }
-
     public Collection<StreamsGraphNode> children() {
         return new LinkedHashSet<>(childNodes);
     }
 
-    public void addChildNode(final StreamsGraphNode childNode) {
+    public void clearChildren() {
+        for (final StreamsGraphNode childNode : childNodes) {
+            childNode.parentNodes.remove(this);
+        }
+        childNodes.clear();
+    }
+
+    public boolean removeChild(final StreamsGraphNode child) {
+        return childNodes.remove(child) && child.parentNodes.remove(this);
+    }
+
+    public void addChild(final StreamsGraphNode childNode) {
         this.childNodes.add(childNode);
-        childNode.addParentNode(this);
+        childNode.parentNodes.add(this);
     }
 
     public String nodeName() {
         return nodeName;
     }
 
-    public boolean repartitionRequired() {
-        return repartitionRequired;
-    }
-
     public boolean isKeyChangingOperation() {
         return keyChangingOperation;
+    }
+
+    public boolean isValueChangingOperation() {
+        return valueChangingOperation;
+    }
+
+    public boolean isMergeNode() {
+        return mergeNode;
+    }
+
+    public void setMergeNode(final boolean mergeNode) {
+        this.mergeNode = mergeNode;
+    }
+
+    public void setValueChangingOperation(final boolean valueChangingOperation) {
+        this.valueChangingOperation = valueChangingOperation;
     }
 
     public void keyChangingOperation(final boolean keyChangingOperation) {
         this.keyChangingOperation = keyChangingOperation;
     }
 
-    public void setId(final int id) {
-        this.id = id;
+    public void setBuildPriority(final int buildPriority) {
+        this.buildPriority = buildPriority;
     }
 
-    public Integer id() {
-        return this.id;
+    public Integer buildPriority() {
+        return this.buildPriority;
     }
 
     public abstract void writeToTopology(final InternalTopologyBuilder topologyBuilder);
@@ -114,7 +132,11 @@ public abstract class StreamsGraphNode {
         final String[] parentNames = parentNodeNames();
         return "StreamsGraphNode{" +
                "nodeName='" + nodeName + '\'' +
-               ", id=" + id +
-               " parentNodes=" + Arrays.toString(parentNames) + '}';
+               ", buildPriority=" + buildPriority +
+               ", hasWrittenToTopology=" + hasWrittenToTopology +
+               ", keyChangingOperation=" + keyChangingOperation +
+               ", valueChangingOperation=" + valueChangingOperation +
+               ", mergeNode=" + mergeNode +
+               ", parentNodes=" + Arrays.toString(parentNames) + '}';
     }
 }

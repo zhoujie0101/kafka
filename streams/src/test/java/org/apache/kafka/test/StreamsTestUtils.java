@@ -16,11 +16,12 @@
  */
 package org.apache.kafka.test;
 
-import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.common.Metric;
 import org.apache.kafka.common.MetricName;
 import org.apache.kafka.common.serialization.Serde;
+import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.common.utils.Bytes;
+import org.apache.kafka.streams.KafkaStreams;
 import org.apache.kafka.streams.KeyValue;
 import org.apache.kafka.streams.StreamsConfig;
 import org.apache.kafka.streams.kstream.Windowed;
@@ -31,7 +32,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
+import static org.apache.kafka.common.metrics.Sensor.RecordingLevel.DEBUG;
+import static org.apache.kafka.test.TestUtils.DEFAULT_MAX_WAIT_MS;
 import static org.hamcrest.CoreMatchers.equalTo;
 import static org.hamcrest.MatcherAssert.assertThat;
 
@@ -44,48 +49,57 @@ public final class StreamsTestUtils {
                                               final String valueSerdeClassName,
                                               final Properties additional) {
 
-        final Properties streamsConfiguration = new Properties();
-        streamsConfiguration.put(StreamsConfig.APPLICATION_ID_CONFIG, applicationId);
-        streamsConfiguration.put(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
-        streamsConfiguration.put(ConsumerConfig.METADATA_MAX_AGE_CONFIG, "1000");
-        streamsConfiguration.put(StreamsConfig.DEFAULT_KEY_SERDE_CLASS_CONFIG, keySerdeClassName);
-        streamsConfiguration.put(StreamsConfig.DEFAULT_VALUE_SERDE_CLASS_CONFIG, valueSerdeClassName);
-        streamsConfiguration.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
-        streamsConfiguration.put(StreamsConfig.STATE_DIR_CONFIG, TestUtils.tempDirectory().getPath());
-        streamsConfiguration.put(StreamsConfig.CACHE_MAX_BYTES_BUFFERING_CONFIG, 0);
-        streamsConfiguration.put(StreamsConfig.COMMIT_INTERVAL_MS_CONFIG, 100);
-        streamsConfiguration.putAll(additional);
-        return streamsConfiguration;
-
-    }
-
-    public static Properties topologyTestConfig(final String applicationId,
-                                                final String bootstrapServers,
-                                                final String keyDeserializer,
-                                                final String valueDeserializer) {
         final Properties props = new Properties();
         props.put(StreamsConfig.APPLICATION_ID_CONFIG, applicationId);
-        props.setProperty(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
-        props.setProperty(StreamsConfig.STATE_DIR_CONFIG, TestUtils.tempDirectory().getAbsolutePath());
-        props.setProperty(StreamsConfig.DEFAULT_KEY_SERDE_CLASS_CONFIG, keyDeserializer);
-        props.setProperty(StreamsConfig.DEFAULT_VALUE_SERDE_CLASS_CONFIG, valueDeserializer);
+        props.put(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
+        props.put(StreamsConfig.DEFAULT_KEY_SERDE_CLASS_CONFIG, keySerdeClassName);
+        props.put(StreamsConfig.DEFAULT_VALUE_SERDE_CLASS_CONFIG, valueSerdeClassName);
+        props.put(StreamsConfig.STATE_DIR_CONFIG, TestUtils.tempDirectory().getPath());
+        props.put(StreamsConfig.METRICS_RECORDING_LEVEL_CONFIG, DEBUG.name);
+        props.putAll(additional);
         return props;
     }
 
-    public static Properties topologyTestConfig(final Serde keyDeserializer,
-                                                final Serde valueDeserializer) {
-        return topologyTestConfig(
+    public static Properties getStreamsConfig(final Serde keyDeserializer,
+                                              final Serde valueDeserializer) {
+        return getStreamsConfig(
                 UUID.randomUUID().toString(),
                 "localhost:9091",
                 keyDeserializer.getClass().getName(),
-                valueDeserializer.getClass().getName());
+                valueDeserializer.getClass().getName(),
+                new Properties());
     }
 
-    public static Properties minimalStreamsConfig() {
-        final Properties properties = new Properties();
-        properties.put(StreamsConfig.APPLICATION_ID_CONFIG, UUID.randomUUID().toString());
-        properties.put(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, "anyserver:9092");
-        return properties;
+    public static Properties getStreamsConfig(final String applicationId) {
+        return getStreamsConfig(
+            applicationId,
+            "localhost:9091",
+            Serdes.ByteArraySerde.class.getName(),
+            Serdes.ByteArraySerde.class.getName(),
+            new Properties());
+    }
+
+    public static Properties getStreamsConfig() {
+        return getStreamsConfig(UUID.randomUUID().toString());
+    }
+
+    public static void startKafkaStreamsAndWaitForRunningState(final KafkaStreams kafkaStreams) throws InterruptedException {
+        startKafkaStreamsAndWaitForRunningState(kafkaStreams, DEFAULT_MAX_WAIT_MS);
+    }
+
+    public static void startKafkaStreamsAndWaitForRunningState(final KafkaStreams kafkaStreams,
+                                                               final long timeoutMs) throws InterruptedException {
+        final CountDownLatch countDownLatch = new CountDownLatch(1);
+        kafkaStreams.setStateListener((newState, oldState) -> {
+            if (newState == KafkaStreams.State.RUNNING) {
+                countDownLatch.countDown();
+            }
+        });
+
+        kafkaStreams.start();
+        assertThat(
+            "KafkaStreams did not transit to RUNNING state within " + timeoutMs + " milli seconds.",
+            countDownLatch.await(timeoutMs, TimeUnit.MILLISECONDS), equalTo(true));
     }
 
     public static <K, V> List<KeyValue<K, V>> toList(final Iterator<KeyValue<K, V>> iterator) {
@@ -93,6 +107,15 @@ public final class StreamsTestUtils {
 
         while (iterator.hasNext()) {
             results.add(iterator.next());
+        }
+        return results;
+    }
+
+    public static <K, V> List<V> valuesToList(final Iterator<KeyValue<K, V>> iterator) {
+        final List<V> results = new ArrayList<>();
+
+        while (iterator.hasNext()) {
+            results.add(iterator.next().value);
         }
         return results;
     }

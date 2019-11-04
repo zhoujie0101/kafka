@@ -39,11 +39,12 @@ import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
-import java.nio.file.SimpleFileVisitor;
 import java.nio.file.Paths;
+import java.nio.file.SimpleFileVisitor;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.text.DecimalFormat;
+import java.text.DecimalFormatSymbols;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -53,12 +54,17 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Properties;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 public final class Utils {
 
@@ -71,7 +77,8 @@ public final class Utils {
     private static final Pattern VALID_HOST_CHARACTERS = Pattern.compile("([0-9a-zA-Z\\-%._:]*)");
 
     // Prints up to 2 decimal digits. Used for human readable printing
-    private static final DecimalFormat TWO_DIGIT_FORMAT = new DecimalFormat("0.##");
+    private static final DecimalFormat TWO_DIGIT_FORMAT = new DecimalFormat("0.##",
+        DecimalFormatSymbols.getInstance(Locale.ENGLISH));
 
     private static final String[] BYTE_SCALE_SUFFIXES = new String[] {"B", "KB", "MB", "GB", "TB", "PB", "EB", "ZB", "YB"};
 
@@ -272,17 +279,12 @@ public final class Utils {
     }
 
     /**
-     * Check that the parameter t is not null
-     *
-     * @param t The object to check
-     * @return t if it isn't null
-     * @throws NullPointerException if t is null.
+     * Returns a copy of src byte array
+     * @param src The byte array to copy
+     * @return The copy
      */
-    public static <T> T notNull(T t) {
-        if (t == null)
-            throw new NullPointerException();
-        else
-            return t;
+    public static byte[] copyArray(byte[] src) {
+        return Arrays.copyOf(src, src.length);
     }
 
     /**
@@ -377,6 +379,7 @@ public final class Utils {
      * @param data byte array to hash
      * @return 32 bit hash of the given array
      */
+    @SuppressWarnings("fallthrough")
     public static int murmur2(final byte[] data) {
         int length = data.length;
         int seed = 0x9747b28c;
@@ -589,15 +592,6 @@ public final class Utils {
     }
 
     /**
-     * Print an error message and shutdown the JVM
-     * @param message The error message
-     */
-    public static void croak(String message) {
-        System.err.println(message);
-        Exit.exit(1);
-    }
-
-    /**
      * Read a buffer into a Byte array for the given offset and length
      */
     public static byte[] readBytes(ByteBuffer buffer, int offset, int length) {
@@ -662,18 +656,10 @@ public final class Utils {
      */
     @SafeVarargs
     public static <T> Set<T> mkSet(T... elems) {
-        return new HashSet<>(Arrays.asList(elems));
-    }
-
-    /*
-     * Creates a list
-     * @param elems the elements
-     * @param <T> the type of element
-     * @return List
-     */
-    @SafeVarargs
-    public static <T> List<T> mkList(T... elems) {
-        return Arrays.asList(elems);
+        Set<T> result = new HashSet<>((int) (elems.length / 0.75) + 1);
+        for (T elem : elems)
+            result.add(elem);
+        return result;
     }
 
     /**
@@ -772,7 +758,7 @@ public final class Utils {
      * @return
      */
     public static <T> List<T> safe(List<T> other) {
-        return other == null ? Collections.<T>emptyList() : other;
+        return other == null ? Collections.emptyList() : other;
     }
 
    /**
@@ -852,6 +838,17 @@ public final class Utils {
         }
     }
 
+    public static void closeQuietly(AutoCloseable closeable, String name, AtomicReference<Throwable> firstException) {
+        if (closeable != null) {
+            try {
+                closeable.close();
+            } catch (Throwable t) {
+                firstException.compareAndSet(null, t);
+                log.error("Failed to close {} with type {}", name, closeable.getClass().getName(), t);
+            }
+        }
+    }
+
     /**
      * A cheap way to deterministically convert a number to a positive value. When the input is
      * positive, the original value is returned. When the input number is negative, the returned
@@ -867,10 +864,6 @@ public final class Utils {
      */
     public static int toPositive(int number) {
         return number & 0x7fffffff;
-    }
-
-    public static int longHashcode(long value) {
-        return (int) (value ^ (value >>> 32));
     }
 
     /**
@@ -1000,4 +993,49 @@ public final class Utils {
         return res;
     }
 
+    public static <T> List<T> concatListsUnmodifiable(List<T> left, List<T> right) {
+        return concatLists(left, right, Collections::unmodifiableList);
+    }
+
+    public static <T> List<T> concatLists(List<T> left, List<T> right, Function<List<T>, List<T>> finisher) {
+        return Stream.concat(left.stream(), right.stream())
+                .collect(Collectors.collectingAndThen(Collectors.toList(), finisher));
+    }
+
+    public static int to32BitField(final Set<Byte> bytes) {
+        int value = 0;
+        for (final byte b : bytes)
+            value |= 1 << checkRange(b);
+        return value;
+    }
+
+    private static byte checkRange(final byte i) {
+        if (i > 31)
+            throw new IllegalArgumentException("out of range: i>31, i = " + i);
+        if (i < 0)
+            throw new IllegalArgumentException("out of range: i<0, i = " + i);
+        return i;
+    }
+
+    public static Set<Byte> from32BitField(final int intValue) {
+        Set<Byte> result = new HashSet<>();
+        for (int itr = intValue, count = 0; itr != 0; itr >>>= 1) {
+            if ((itr & 1) != 0)
+                result.add((byte) count);
+            count++;
+        }
+        return result;
+    }
+
+    public static <K1, V1, K2, V2> Map<K2, V2> transformMap(
+            Map<? extends K1, ? extends V1> map,
+            Function<K1, K2> keyMapper,
+            Function<V1, V2> valueMapper) {
+        return map.entrySet().stream().collect(
+            Collectors.toMap(
+                entry -> keyMapper.apply(entry.getKey()),
+                entry -> valueMapper.apply(entry.getValue())
+            )
+        );
+    }
 }

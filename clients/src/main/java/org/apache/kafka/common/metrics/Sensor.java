@@ -19,18 +19,20 @@ package org.apache.kafka.common.metrics;
 import org.apache.kafka.common.MetricName;
 import org.apache.kafka.common.metrics.CompoundStat.NamedMeasurable;
 import org.apache.kafka.common.utils.Time;
-import org.apache.kafka.common.utils.Utils;
 
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+
+import static java.util.Arrays.asList;
+import static java.util.Collections.unmodifiableList;
 
 /**
  * A sensor applies a continuous sequence of numerical values to a set of associated metrics. For example a sensor on
@@ -105,7 +107,7 @@ public final class Sensor {
            long inactiveSensorExpirationTimeSeconds, RecordingLevel recordingLevel) {
         super();
         this.registry = registry;
-        this.name = Utils.notNull(name);
+        this.name = Objects.requireNonNull(name);
         this.parents = parents == null ? new Sensor[0] : parents;
         this.metrics = new LinkedHashMap<>();
         this.stats = new ArrayList<>();
@@ -131,6 +133,10 @@ public final class Sensor {
      */
     public String name() {
         return this.name;
+    }
+
+    List<Sensor> parents() {
+        return unmodifiableList(asList(parents));
     }
 
     /**
@@ -232,7 +238,7 @@ public final class Sensor {
         if (hasExpired())
             return false;
 
-        this.stats.add(Utils.notNull(stat));
+        this.stats.add(Objects.requireNonNull(stat));
         Object lock = metricLock();
         for (NamedMeasurable m : stat.stats()) {
             final KafkaMetric metric = new KafkaMetric(lock, m.name(), m.stat(), config == null ? this.config : config, time);
@@ -270,8 +276,8 @@ public final class Sensor {
         } else {
             final KafkaMetric metric = new KafkaMetric(
                 metricLock(),
-                Utils.notNull(metricName),
-                Utils.notNull(stat),
+                Objects.requireNonNull(metricName),
+                Objects.requireNonNull(stat),
                 config == null ? this.config : config,
                 time
             );
@@ -291,7 +297,7 @@ public final class Sensor {
     }
 
     synchronized List<KafkaMetric> metrics() {
-        return Collections.unmodifiableList(new LinkedList<>(this.metrics.values()));
+        return unmodifiableList(new LinkedList<>(this.metrics.values()));
     }
 
     /**

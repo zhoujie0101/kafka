@@ -30,7 +30,7 @@ class ServerStartupTest extends ZooKeeperTestHarness {
   private var server: KafkaServer = null
 
   @After
-  override def tearDown() {
+  override def tearDown(): Unit = {
     if (server != null)
       TestUtils.shutdownServers(Seq(server))
     super.tearDown()
@@ -105,7 +105,7 @@ class ServerStartupTest extends ZooKeeperTestHarness {
   @Test
   def testBrokerStateRunningAfterZK(): Unit = {
     val brokerId = 0
-    val mockBrokerState = EasyMock.niceMock(classOf[kafka.server.BrokerState])
+    val mockBrokerState: BrokerState = EasyMock.niceMock(classOf[BrokerState])
 
     class BrokerStateInterceptor() extends BrokerState {
       override def newState(newState: BrokerStates): Unit = {

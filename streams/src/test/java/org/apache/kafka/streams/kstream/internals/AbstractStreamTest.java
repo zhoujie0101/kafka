@@ -31,7 +31,7 @@ import org.apache.kafka.streams.kstream.internals.graph.ProcessorParameters;
 import org.apache.kafka.streams.processor.AbstractProcessor;
 import org.apache.kafka.streams.processor.Processor;
 import org.apache.kafka.streams.processor.ProcessorSupplier;
-import org.apache.kafka.streams.test.ConsumerRecordFactory;
+import org.apache.kafka.streams.TestInputTopic;
 import org.apache.kafka.test.MockProcessorSupplier;
 import org.apache.kafka.test.TestUtils;
 import org.junit.Test;
@@ -48,10 +48,10 @@ import static org.junit.Assert.assertTrue;
 public class AbstractStreamTest {
 
     @Test
-    public void testToInternlValueTransformerSupplierSuppliesNewTransformers() {
-        final ValueTransformerSupplier valueTransformerSupplier = createMock(ValueTransformerSupplier.class);
+    public void testToInternalValueTransformerSupplierSuppliesNewTransformers() {
+        final ValueTransformerSupplier<?, ?> valueTransformerSupplier = createMock(ValueTransformerSupplier.class);
         expect(valueTransformerSupplier.get()).andReturn(null).times(3);
-        final ValueTransformerWithKeySupplier valueTransformerWithKeySupplier =
+        final ValueTransformerWithKeySupplier<?, ?, ?> valueTransformerWithKeySupplier =
             AbstractStream.toValueTransformerWithKeySupplier(valueTransformerSupplier);
         replay(valueTransformerSupplier);
         valueTransformerWithKeySupplier.get();
@@ -61,8 +61,9 @@ public class AbstractStreamTest {
     }
 
     @Test
-    public void testToInternalValueTransformerSupplierSuppliesNewTransformers() {
-        final ValueTransformerWithKeySupplier valueTransformerWithKeySupplier = createMock(ValueTransformerWithKeySupplier.class);
+    public void testToInternalValueTransformerWithKeySupplierSuppliesNewTransformers() {
+        final ValueTransformerWithKeySupplier<?, ?, ?> valueTransformerWithKeySupplier =
+            createMock(ValueTransformerWithKeySupplier.class);
         expect(valueTransformerWithKeySupplier.get()).andReturn(null).times(3);
         replay(valueTransformerWithKeySupplier);
         valueTransformerWithKeySupplier.get();
@@ -87,16 +88,16 @@ public class AbstractStreamTest {
         props.setProperty(StreamsConfig.BOOTSTRAP_SERVERS_CONFIG, "localhost:9091");
         props.setProperty(StreamsConfig.STATE_DIR_CONFIG, TestUtils.tempDirectory().getAbsolutePath());
 
-        final ConsumerRecordFactory<Integer, String> recordFactory = new ConsumerRecordFactory<>(new IntegerSerializer(), new StringSerializer());
         final TopologyTestDriver driver = new TopologyTestDriver(builder.build(), props);
+        final TestInputTopic<Integer, String> inputTopic = driver.createInputTopic(topicName, new IntegerSerializer(), new StringSerializer());
         for (final int expectedKey : expectedKeys) {
-            driver.pipeInput(recordFactory.create(topicName, expectedKey, "V" + expectedKey));
+            inputTopic.pipeInput(expectedKey, "V" + expectedKey);
         }
 
         assertTrue(supplier.theCapturedProcessor().processed.size() <= expectedKeys.length);
     }
 
-    private class ExtendedKStream<K, V> extends AbstractStream<K> {
+    private class ExtendedKStream<K, V> extends AbstractStream<K, V> {
 
         ExtendedKStream(final KStream<K, V> stream) {
             super((KStreamImpl<K, V>) stream);
@@ -104,17 +105,17 @@ public class AbstractStreamTest {
 
         KStream<K, V> randomFilter() {
             final String name = builder.newProcessorName("RANDOM-FILTER-");
-            final ProcessorGraphNode processorNode = new ProcessorGraphNode(name,
-                                                                            new ProcessorParameters<>(new ExtendedKStreamDummy<>(), name),
-                                                                            false);
+            final ProcessorGraphNode<K, V> processorNode = new ProcessorGraphNode<>(
+                name,
+                new ProcessorParameters<>(new ExtendedKStreamDummy<>(), name));
             builder.addGraphNode(this.streamsGraphNode, processorNode);
-            return new KStreamImpl<>(builder, name, sourceNodes, false, processorNode);
+            return new KStreamImpl<>(name, null, null, sourceNodes, false, processorNode, builder);
         }
     }
 
     private class ExtendedKStreamDummy<K, V> implements ProcessorSupplier<K, V> {
 
-        private Random rand;
+        private final Random rand;
 
         ExtendedKStreamDummy() {
             rand = new Random();
@@ -129,8 +130,9 @@ public class AbstractStreamTest {
             @Override
             public void process(final K key, final V value) {
                 // flip a coin and filter
-                if (rand.nextBoolean())
+                if (rand.nextBoolean()) {
                     context().forward(key, value);
+                }
             }
         }
     }

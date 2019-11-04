@@ -16,7 +16,6 @@
  */
 package org.apache.kafka.streams.state.internals;
 
-import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.common.utils.Bytes;
 import org.apache.kafka.streams.state.SessionBytesStoreSupplier;
 import org.apache.kafka.streams.state.SessionStore;
@@ -40,15 +39,16 @@ public class RocksDbSessionBytesStoreSupplier implements SessionBytesStoreSuppli
     public SessionStore<Bytes, byte[]> get() {
         final RocksDBSegmentedBytesStore segmented = new RocksDBSegmentedBytesStore(
             name,
+            metricsScope(),
             retentionPeriod,
             segmentIntervalMs(),
             new SessionKeySchema());
-        return new RocksDBSessionStore<>(segmented, Serdes.Bytes(), Serdes.ByteArray());
+        return new RocksDBSessionStore(segmented);
     }
 
     @Override
     public String metricsScope() {
-        return "rocksdb-session-state";
+        return "rocksdb-session";
     }
 
     @Override

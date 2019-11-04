@@ -20,15 +20,16 @@
 package org.apache.kafka.streams.scala
 package kstream
 
-import org.apache.kafka.streams.kstream.{TimeWindowedKStream => TimeWindowedKStreamJ, _}
+import org.apache.kafka.streams.kstream.internals.KTableImpl
+import org.apache.kafka.streams.kstream.{KTable => KTableJ, TimeWindowedKStream => TimeWindowedKStreamJ, _}
 import org.apache.kafka.streams.scala.ImplicitConversions._
-import org.apache.kafka.streams.scala.FunctionConversions._
+import org.apache.kafka.streams.scala.FunctionsCompatConversions._
 
 /**
  * Wraps the Java class TimeWindowedKStream and delegates method calls to the underlying Java object.
  *
- * @param [K] Type of keys
- * @param [V] Type of values
+ * @tparam K    Type of keys
+ * @tparam V    Type of values
  * @param inner The underlying Java abstraction for TimeWindowedKStream
  *
  * @see `org.apache.kafka.streams.kstream.TimeWindowedKStream`
@@ -59,9 +60,13 @@ class TimeWindowedKStream[K, V](val inner: TimeWindowedKStreamJ[K, V]) {
    * @see `org.apache.kafka.streams.kstream.TimeWindowedKStream#count`
    */
   def count()(implicit materialized: Materialized[K, Long, ByteArrayWindowStore]): KTable[Windowed[K], Long] = {
-    val c: KTable[Windowed[K], java.lang.Long] =
+    val javaCountTable: KTableJ[Windowed[K], java.lang.Long] =
       inner.count(materialized.asInstanceOf[Materialized[K, java.lang.Long, ByteArrayWindowStore]])
-    c.mapValues[Long](Long2long _)
+    val tableImpl = javaCountTable.asInstanceOf[KTableImpl[Windowed[K], ByteArrayWindowStore, java.lang.Long]]
+    javaCountTable.mapValues[Long](
+      ((l: java.lang.Long) => Long2long(l)).asValueMapper,
+      Materialized.`with`[Windowed[K], Long, ByteArrayKeyValueStore](tableImpl.keySerde(), Serdes.Long)
+    )
   }
 
   /**

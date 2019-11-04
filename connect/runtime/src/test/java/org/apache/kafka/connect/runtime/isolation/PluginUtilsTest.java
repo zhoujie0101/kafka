@@ -45,7 +45,7 @@ public class PluginUtilsTest {
     }
 
     @Test
-    public void testJavaLibraryClasses() throws Exception {
+    public void testJavaLibraryClasses() {
         assertFalse(PluginUtils.shouldLoadInIsolation("java."));
         assertFalse(PluginUtils.shouldLoadInIsolation("java.lang.Object"));
         assertFalse(PluginUtils.shouldLoadInIsolation("java.lang.String"));
@@ -64,13 +64,13 @@ public class PluginUtilsTest {
     }
 
     @Test
-    public void testThirdPartyClasses() throws Exception {
+    public void testThirdPartyClasses() {
         assertFalse(PluginUtils.shouldLoadInIsolation("org.slf4j."));
         assertFalse(PluginUtils.shouldLoadInIsolation("org.slf4j.LoggerFactory"));
     }
 
     @Test
-    public void testConnectFrameworkClasses() throws Exception {
+    public void testConnectFrameworkClasses() {
         assertFalse(PluginUtils.shouldLoadInIsolation("org.apache.kafka.common."));
         assertFalse(PluginUtils.shouldLoadInIsolation(
                 "org.apache.kafka.common.config.AbstractConfig")
@@ -120,7 +120,7 @@ public class PluginUtilsTest {
     }
 
     @Test
-    public void testAllowedConnectFrameworkClasses() throws Exception {
+    public void testAllowedConnectFrameworkClasses() {
         assertTrue(PluginUtils.shouldLoadInIsolation("org.apache.kafka.connect.transforms."));
         assertTrue(PluginUtils.shouldLoadInIsolation(
                 "org.apache.kafka.connect.transforms.ExtractField")
@@ -141,6 +141,12 @@ public class PluginUtilsTest {
         );
         assertTrue(PluginUtils.shouldLoadInIsolation(
                 "org.apache.kafka.connect.file.FileStreamSinkConnector")
+        );
+        assertTrue(PluginUtils.shouldLoadInIsolation(
+                "org.apache.kafka.connect.mirror.MirrorSourceTask")
+        );
+        assertTrue(PluginUtils.shouldLoadInIsolation(
+                "org.apache.kafka.connect.mirror.MirrorSourceConnector")
         );
         assertTrue(PluginUtils.shouldLoadInIsolation("org.apache.kafka.connect.converters."));
         assertTrue(PluginUtils.shouldLoadInIsolation(
@@ -173,7 +179,7 @@ public class PluginUtilsTest {
     }
 
     @Test
-    public void testClientConfigProvider() throws Exception {
+    public void testClientConfigProvider() {
         assertFalse(PluginUtils.shouldLoadInIsolation(
                 "org.apache.kafka.common.config.provider.ConfigProvider")
         );
@@ -182,6 +188,25 @@ public class PluginUtilsTest {
         );
         assertTrue(PluginUtils.shouldLoadInIsolation(
                 "org.apache.kafka.common.config.provider.FutureConfigProvider")
+        );
+    }
+
+    @Test
+    public void testConnectorClientConfigOverridePolicy() {
+        assertFalse(PluginUtils.shouldLoadInIsolation(
+                "org.apache.kafka.connect.connector.policy.ConnectorClientConfigOverridePolicy")
+        );
+        assertTrue(PluginUtils.shouldLoadInIsolation(
+                "org.apache.kafka.connect.connector.policy.AbstractConnectorClientConfigOverridePolicy")
+        );
+        assertTrue(PluginUtils.shouldLoadInIsolation(
+                "org.apache.kafka.connect.connector.policy.AllConnectorClientConfigOverridePolicy")
+        );
+        assertTrue(PluginUtils.shouldLoadInIsolation(
+                "org.apache.kafka.connect.connector.policy.NoneConnectorClientConfigOverridePolicy")
+        );
+        assertTrue(PluginUtils.shouldLoadInIsolation(
+                "org.apache.kafka.connect.connector.policy.PrincipalConnectorClientConfigOverridePolicy")
         );
     }
 

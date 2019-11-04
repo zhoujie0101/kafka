@@ -20,17 +20,17 @@ import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.MetricName;
 import org.apache.kafka.common.errors.AuthenticationException;
 import org.apache.kafka.common.memory.MemoryPool;
-import org.apache.kafka.common.metrics.Measurable;
-import org.apache.kafka.common.metrics.MetricConfig;
 import org.apache.kafka.common.metrics.Metrics;
 import org.apache.kafka.common.metrics.Sensor;
 import org.apache.kafka.common.metrics.stats.Avg;
-import org.apache.kafka.common.metrics.stats.Count;
+import org.apache.kafka.common.metrics.stats.CumulativeSum;
 import org.apache.kafka.common.metrics.stats.Max;
 import org.apache.kafka.common.metrics.stats.Meter;
+import org.apache.kafka.common.metrics.stats.WindowedCount;
 import org.apache.kafka.common.metrics.stats.SampledStat;
 import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.common.utils.Time;
+import org.apache.kafka.common.utils.Utils;
 import org.slf4j.Logger;
 
 import java.io.IOException;
@@ -53,6 +53,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * A nioSelector interface for doing non-blocking multi-connection network I/O.
@@ -86,6 +87,7 @@ import java.util.concurrent.TimeUnit;
 public class Selector implements Selectable, AutoCloseable {
 
     public static final long NO_IDLE_TIMEOUT_MS = -1;
+    public static final int NO_FAILED_AUTHENTICATION_DELAY = 0;
 
     private enum CloseMode {
         GRACEFUL(true),            // process outstanding staged receives, notify disconnect
@@ -119,8 +121,11 @@ public class Selector implements Selectable, AutoCloseable {
     private final int maxReceiveSize;
     private final boolean recordTimePerConnection;
     private final IdleExpiryManager idleExpiryManager;
+    private final LinkedHashMap<String, DelayedAuthenticationFailureClose> delayedClosingChannels;
     private final MemoryPool memoryPool;
     private final long lowMemThreshold;
+    private final int failedAuthenticationDelayMs;
+
     //indicates if the previous call to poll was able to make progress in reading already-buffered data.
     //this is used to prevent tight loops when memory is not available to read any more data
     private boolean madeReadProgressLastPoll = true;
@@ -129,6 +134,8 @@ public class Selector implements Selectable, AutoCloseable {
      * Create a new nioSelector
      * @param maxReceiveSize Max size in bytes of a single network receive (use {@link NetworkReceive#UNLIMITED} for no limit)
      * @param connectionMaxIdleMs Max idle connection time (use {@link #NO_IDLE_TIMEOUT_MS} to disable idle timeout)
+     * @param failedAuthenticationDelayMs Minimum time by which failed authentication response and channel close should be delayed by.
+     *                                    Use {@link #NO_FAILED_AUTHENTICATION_DELAY} to disable this delay.
      * @param metrics Registry for Selector metrics
      * @param time Time implementation
      * @param metricGrpPrefix Prefix for the group of metrics registered by Selector
@@ -139,6 +146,7 @@ public class Selector implements Selectable, AutoCloseable {
      */
     public Selector(int maxReceiveSize,
             long connectionMaxIdleMs,
+            int failedAuthenticationDelayMs,
             Metrics metrics,
             Time time,
             String metricGrpPrefix,
@@ -174,22 +182,56 @@ public class Selector implements Selectable, AutoCloseable {
         this.memoryPool = memoryPool;
         this.lowMemThreshold = (long) (0.1 * this.memoryPool.size());
         this.log = logContext.logger(Selector.class);
+        this.failedAuthenticationDelayMs = failedAuthenticationDelayMs;
+        this.delayedClosingChannels = (failedAuthenticationDelayMs > NO_FAILED_AUTHENTICATION_DELAY) ? new LinkedHashMap<String, DelayedAuthenticationFailureClose>() : null;
     }
 
     public Selector(int maxReceiveSize,
-            long connectionMaxIdleMs,
-            Metrics metrics,
-            Time time,
-            String metricGrpPrefix,
-            Map<String, String> metricTags,
-            boolean metricsPerConnection,
-            ChannelBuilder channelBuilder,
-            LogContext logContext) {
-        this(maxReceiveSize, connectionMaxIdleMs, metrics, time, metricGrpPrefix, metricTags, metricsPerConnection, false, channelBuilder, MemoryPool.NONE, logContext);
+                    long connectionMaxIdleMs,
+                    Metrics metrics,
+                    Time time,
+                    String metricGrpPrefix,
+                    Map<String, String> metricTags,
+                    boolean metricsPerConnection,
+                    boolean recordTimePerConnection,
+                    ChannelBuilder channelBuilder,
+                    MemoryPool memoryPool,
+                    LogContext logContext) {
+        this(maxReceiveSize, connectionMaxIdleMs, NO_FAILED_AUTHENTICATION_DELAY, metrics, time, metricGrpPrefix, metricTags,
+                metricsPerConnection, recordTimePerConnection, channelBuilder, memoryPool, logContext);
+    }
+
+    public Selector(int maxReceiveSize,
+                    long connectionMaxIdleMs,
+                    int failedAuthenticationDelayMs,
+                    Metrics metrics,
+                    Time time,
+                    String metricGrpPrefix,
+                    Map<String, String> metricTags,
+                    boolean metricsPerConnection,
+                    ChannelBuilder channelBuilder,
+                    LogContext logContext) {
+        this(maxReceiveSize, connectionMaxIdleMs, failedAuthenticationDelayMs, metrics, time, metricGrpPrefix, metricTags, metricsPerConnection, false, channelBuilder, MemoryPool.NONE, logContext);
+    }
+
+    public Selector(int maxReceiveSize,
+                    long connectionMaxIdleMs,
+                    Metrics metrics,
+                    Time time,
+                    String metricGrpPrefix,
+                    Map<String, String> metricTags,
+                    boolean metricsPerConnection,
+                    ChannelBuilder channelBuilder,
+                    LogContext logContext) {
+        this(maxReceiveSize, connectionMaxIdleMs, NO_FAILED_AUTHENTICATION_DELAY, metrics, time, metricGrpPrefix, metricTags, metricsPerConnection, channelBuilder, logContext);
     }
 
     public Selector(long connectionMaxIdleMS, Metrics metrics, Time time, String metricGrpPrefix, ChannelBuilder channelBuilder, LogContext logContext) {
-        this(NetworkReceive.UNLIMITED, connectionMaxIdleMS, metrics, time, metricGrpPrefix, Collections.<String, String>emptyMap(), true, channelBuilder, logContext);
+        this(NetworkReceive.UNLIMITED, connectionMaxIdleMS, metrics, time, metricGrpPrefix, Collections.emptyMap(), true, channelBuilder, logContext);
+    }
+
+    public Selector(long connectionMaxIdleMS, int failedAuthenticationDelayMs, Metrics metrics, Time time, String metricGrpPrefix, ChannelBuilder channelBuilder, LogContext logContext) {
+        this(NetworkReceive.UNLIMITED, connectionMaxIdleMS, failedAuthenticationDelayMs, metrics, time, metricGrpPrefix, Collections.<String, String>emptyMap(), true, channelBuilder, logContext);
     }
 
     /**
@@ -209,10 +251,11 @@ public class Selector implements Selectable, AutoCloseable {
     public void connect(String id, InetSocketAddress address, int sendBufferSize, int receiveBufferSize) throws IOException {
         ensureNotRegistered(id);
         SocketChannel socketChannel = SocketChannel.open();
+        SelectionKey key = null;
         try {
             configureSocketChannel(socketChannel, sendBufferSize, receiveBufferSize);
             boolean connected = doConnect(socketChannel, address);
-            SelectionKey key = registerChannel(id, socketChannel, SelectionKey.OP_CONNECT);
+            key = registerChannel(id, socketChannel, SelectionKey.OP_CONNECT);
 
             if (connected) {
                 // OP_CONNECT won't trigger for immediately connected channels
@@ -221,6 +264,9 @@ public class Selector implements Selectable, AutoCloseable {
                 key.interestOps(0);
             }
         } catch (IOException | RuntimeException e) {
+            if (key != null)
+                immediatelyConnectedKeys.remove(key);
+            channels.remove(id);
             socketChannel.close();
             throw e;
         }
@@ -275,10 +321,12 @@ public class Selector implements Selectable, AutoCloseable {
             throw new IllegalStateException("There is already a connection for id " + id + " that is still being closed");
     }
 
-    private SelectionKey registerChannel(String id, SocketChannel socketChannel, int interestedOps) throws IOException {
+    protected SelectionKey registerChannel(String id, SocketChannel socketChannel, int interestedOps) throws IOException {
         SelectionKey key = socketChannel.register(nioSelector, interestedOps);
         KafkaChannel channel = buildAndAttachKafkaChannel(socketChannel, id, key);
         this.channels.put(id, channel);
+        if (idleExpiryManager != null)
+            idleExpiryManager.update(channel.id(), time.nanoseconds());
         return key;
     }
 
@@ -311,15 +359,24 @@ public class Selector implements Selectable, AutoCloseable {
     @Override
     public void close() {
         List<String> connections = new ArrayList<>(channels.keySet());
-        for (String id : connections)
-            close(id);
         try {
-            this.nioSelector.close();
-        } catch (IOException | SecurityException e) {
-            log.error("Exception closing nioSelector:", e);
+            for (String id : connections)
+                close(id);
+        } finally {
+            // If there is any exception thrown in close(id), we should still be able
+            // to close the remaining objects, especially the sensors because keeping
+            // the sensors may lead to failure to start up the ReplicaFetcherThread if
+            // the old sensors with the same names has not yet been cleaned up.
+            AtomicReference<Throwable> firstException = new AtomicReference<>();
+            Utils.closeQuietly(nioSelector, "nioSelector", firstException);
+            Utils.closeQuietly(sensors, "sensors", firstException);
+            Utils.closeQuietly(channelBuilder, "channelBuilder", firstException);
+            Throwable exception = firstException.get();
+            if (exception instanceof RuntimeException && !(exception instanceof SecurityException)) {
+                throw (RuntimeException) exception;
+            }
+
         }
-        sensors.close();
-        channelBuilder.close();
     }
 
     /**
@@ -435,6 +492,9 @@ public class Selector implements Selectable, AutoCloseable {
         long endIo = time.nanoseconds();
         this.sensors.ioTime.record(endIo - endSelect, time.milliseconds());
 
+        // Close channels that were delayed and are now ready to be closed
+        completeDelayedChannelClose(endIo);
+
         // we use the time at the end of select to ensure that we don't close any connections that
         // have just been processed in pollSelectionKeys
         maybeCloseOldestConnection(endSelect);
@@ -457,40 +517,56 @@ public class Selector implements Selectable, AutoCloseable {
         for (SelectionKey key : determineHandlingOrder(selectionKeys)) {
             KafkaChannel channel = channel(key);
             long channelStartTimeNanos = recordTimePerConnection ? time.nanoseconds() : 0;
+            boolean sendFailed = false;
+            String nodeId = channel.id();
 
             // register all per-connection metrics at once
-            sensors.maybeRegisterConnectionMetrics(channel.id());
+            sensors.maybeRegisterConnectionMetrics(nodeId);
             if (idleExpiryManager != null)
-                idleExpiryManager.update(channel.id(), currentTimeNanos);
+                idleExpiryManager.update(nodeId, currentTimeNanos);
 
-            boolean sendFailed = false;
             try {
-
                 /* complete any connections that have finished their handshake (either normally or immediately) */
                 if (isImmediatelyConnected || key.isConnectable()) {
                     if (channel.finishConnect()) {
-                        this.connected.add(channel.id());
+                        this.connected.add(nodeId);
                         this.sensors.connectionCreated.record();
                         SocketChannel socketChannel = (SocketChannel) key.channel();
                         log.debug("Created socket with SO_RCVBUF = {}, SO_SNDBUF = {}, SO_TIMEOUT = {} to node {}",
                                 socketChannel.socket().getReceiveBufferSize(),
                                 socketChannel.socket().getSendBufferSize(),
                                 socketChannel.socket().getSoTimeout(),
-                                channel.id());
-                    } else
+                                nodeId);
+                    } else {
                         continue;
+                    }
                 }
 
                 /* if channel is not ready finish prepare */
                 if (channel.isConnected() && !channel.ready()) {
-                    try {
-                        channel.prepare();
-                    } catch (AuthenticationException e) {
-                        sensors.failedAuthentication.record();
-                        throw e;
+                    channel.prepare();
+                    if (channel.ready()) {
+                        long readyTimeMs = time.milliseconds();
+                        boolean isReauthentication = channel.successfulAuthentications() > 1;
+                        if (isReauthentication) {
+                            sensors.successfulReauthentication.record(1.0, readyTimeMs);
+                            if (channel.reauthenticationLatencyMs() == null)
+                                log.warn(
+                                    "Should never happen: re-authentication latency for a re-authenticated channel was null; continuing...");
+                            else
+                                sensors.reauthenticationLatency
+                                    .record(channel.reauthenticationLatencyMs().doubleValue(), readyTimeMs);
+                        } else {
+                            sensors.successfulAuthentication.record(1.0, readyTimeMs);
+                            if (!channel.connectedClientSupportsReauthentication())
+                                sensors.successfulAuthenticationNoReauth.record(1.0, readyTimeMs);
+                        }
+                        log.debug("Successfully {}authenticated with {}", isReauthentication ?
+                            "re-" : "", channel.socketDescription());
                     }
-                    if (channel.ready())
-                        sensors.successfulAuthentication.record();
+                    List<NetworkReceive> responsesReceivedDuringReauthentication = channel
+                            .getAndClearResponsesReceivedDuringReauthentication();
+                    responsesReceivedDuringReauthentication.forEach(receive -> addToStagedReceives(channel, receive));
                 }
 
                 attemptRead(key, channel);
@@ -506,18 +582,13 @@ public class Selector implements Selectable, AutoCloseable {
                 }
 
                 /* if channel is ready write to any sockets that have space in their buffer and for which we have data */
-                if (channel.ready() && key.isWritable()) {
-                    Send send = null;
-                    try {
-                        send = channel.write();
-                    } catch (Exception e) {
-                        sendFailed = true;
-                        throw e;
-                    }
-                    if (send != null) {
-                        this.completedSends.add(send);
-                        this.sensors.recordBytesSent(channel.id(), send.size());
-                    }
+
+                long nowNanos = channelStartTimeNanos != 0 ? channelStartTimeNanos : currentTimeNanos;
+                try {
+                    attemptWrite(key, channel, nowNanos);
+                } catch (Exception e) {
+                    sendFailed = true;
+                    throw e;
                 }
 
                 /* cancel any defunct sockets */
@@ -526,15 +597,56 @@ public class Selector implements Selectable, AutoCloseable {
 
             } catch (Exception e) {
                 String desc = channel.socketDescription();
-                if (e instanceof IOException)
+                if (e instanceof IOException) {
                     log.debug("Connection with {} disconnected", desc, e);
-                else if (e instanceof AuthenticationException) // will be logged later as error by clients
-                    log.debug("Connection with {} disconnected due to authentication exception", desc, e);
-                else
+                } else if (e instanceof AuthenticationException) {
+                    boolean isReauthentication = channel.successfulAuthentications() > 0;
+                    if (isReauthentication)
+                        sensors.failedReauthentication.record();
+                    else
+                        sensors.failedAuthentication.record();
+                    String exceptionMessage = e.getMessage();
+                    if (e instanceof DelayedResponseAuthenticationException)
+                        exceptionMessage = e.getCause().getMessage();
+                    log.info("Failed {}authentication with {} ({})", isReauthentication ? "re-" : "",
+                        desc, exceptionMessage);
+                } else {
                     log.warn("Unexpected error from {}; closing connection", desc, e);
-                close(channel, sendFailed ? CloseMode.NOTIFY_ONLY : CloseMode.GRACEFUL);
+                }
+
+                if (e instanceof DelayedResponseAuthenticationException)
+                    maybeDelayCloseOnAuthenticationFailure(channel);
+                else
+                    close(channel, sendFailed ? CloseMode.NOTIFY_ONLY : CloseMode.GRACEFUL);
             } finally {
                 maybeRecordTimePerConnection(channel, channelStartTimeNanos);
+            }
+        }
+    }
+
+    private void attemptWrite(SelectionKey key, KafkaChannel channel, long nowNanos) throws IOException {
+        if (channel.hasSend()
+                && channel.ready()
+                && key.isWritable()
+                && !channel.maybeBeginClientReauthentication(() -> nowNanos)) {
+            write(channel);
+        }
+    }
+
+    // package-private for testing
+    void write(KafkaChannel channel) throws IOException {
+        String nodeId = channel.id();
+        long bytesSent = channel.write();
+        Send send = channel.maybeCompleteSend();
+        // We may complete the send with bytesSent < 1 if `TransportLayer.hasPendingWrites` was true and `channel.write()`
+        // caused the pending writes to be written to the socket channel buffer
+        if (bytesSent > 0 || send != null) {
+            long currentTimeMs = time.milliseconds();
+            if (bytesSent > 0)
+                this.sensors.recordBytesSent(nodeId, bytesSent, currentTimeMs);
+            if (send != null) {
+                this.completedSends.add(send);
+                this.sensors.recordCompletedSend(nodeId, send.size(), currentTimeMs);
             }
         }
     }
@@ -556,12 +668,27 @@ public class Selector implements Selectable, AutoCloseable {
         //previous receive(s) already staged or otherwise in progress then read from it
         if (channel.ready() && (key.isReadable() || channel.hasBytesBuffered()) && !hasStagedReceive(channel)
             && !explicitlyMutedChannels.contains(channel)) {
-            NetworkReceive networkReceive;
-            while ((networkReceive = channel.read()) != null) {
+
+            String nodeId = channel.id();
+
+            while (true) {
+                long bytesReceived = channel.read();
+                if (bytesReceived == 0)
+                    break;
+
+                long currentTimeMs = time.milliseconds();
+                sensors.recordBytesReceived(nodeId, bytesReceived, currentTimeMs);
                 madeReadProgressLastPoll = true;
-                addToStagedReceives(channel, networkReceive);
+
+                NetworkReceive receive = channel.maybeCompleteReceive();
+                if (receive == null)
+                    break;
+
+                sensors.recordCompletedReceive(nodeId, receive.size(), currentTimeMs);
+                addToStagedReceives(channel, receive);
             }
-            if (channel.isMute()) {
+
+            if (channel.isMuted()) {
                 outOfMemory = true; //channel has muted itself due to memory pressure.
             } else {
                 madeReadProgressLastPoll = true;
@@ -631,6 +758,18 @@ public class Selector implements Selectable, AutoCloseable {
             unmute(channel);
     }
 
+    // package-private for testing
+    void completeDelayedChannelClose(long currentTimeNanos) {
+        if (delayedClosingChannels == null)
+            return;
+
+        while (!delayedClosingChannels.isEmpty()) {
+            DelayedAuthenticationFailureClose delayedClose = delayedClosingChannels.values().iterator().next();
+            if (!delayedClose.tryClose(currentTimeNanos))
+                break;
+        }
+    }
+
     private void maybeCloseOldestConnection(long currentTimeNanos) {
         if (idleExpiryManager == null)
             return;
@@ -657,6 +796,7 @@ public class Selector implements Selectable, AutoCloseable {
         this.completedReceives.clear();
         this.connected.clear();
         this.disconnected.clear();
+
         // Remove closed channels after all their staged receives have been processed or if a send was requested
         for (Iterator<Map.Entry<String, KafkaChannel>> it = closingChannels.entrySet().iterator(); it.hasNext(); ) {
             KafkaChannel channel = it.next().getValue();
@@ -667,6 +807,7 @@ public class Selector implements Selectable, AutoCloseable {
                 it.remove();
             }
         }
+
         for (String channel : this.failedSends)
             this.disconnected.put(channel, ChannelState.FAILED_SEND);
         this.failedSends.clear();
@@ -707,6 +848,24 @@ public class Selector implements Selectable, AutoCloseable {
         }
     }
 
+    private void maybeDelayCloseOnAuthenticationFailure(KafkaChannel channel) {
+        DelayedAuthenticationFailureClose delayedClose = new DelayedAuthenticationFailureClose(channel, failedAuthenticationDelayMs);
+        if (delayedClosingChannels != null)
+            delayedClosingChannels.put(channel.id(), delayedClose);
+        else
+            delayedClose.closeNow();
+    }
+
+    private void handleCloseOnAuthenticationFailure(KafkaChannel channel) {
+        try {
+            channel.completeCloseOnAuthenticationFailure();
+        } catch (Exception e) {
+            log.error("Exception handling close on authentication failure node {}", channel.id(), e);
+        } finally {
+            close(channel, CloseMode.GRACEFUL);
+        }
+    }
+
     /**
      * Begin closing this connection.
      * If 'closeMode' is `CloseMode.GRACEFUL`, the channel is disconnected here, but staged receives
@@ -735,9 +894,13 @@ public class Selector implements Selectable, AutoCloseable {
             // stagedReceives will be moved to completedReceives later along with receives from other channels
             closingChannels.put(channel.id(), channel);
             log.debug("Tracking closing connection {} to process outstanding requests", channel.id());
-        } else
+        } else {
             doClose(channel, closeMode.notifyDisconnect);
+        }
         this.channels.remove(channel.id());
+
+        if (delayedClosingChannels != null)
+            delayedClosingChannels.remove(channel.id());
 
         if (idleExpiryManager != null)
             idleExpiryManager.remove(channel.id());
@@ -804,6 +967,28 @@ public class Selector implements Selectable, AutoCloseable {
     }
 
     /**
+     * Returns the lowest priority channel chosen using the following sequence:
+     *   1) If one or more channels are in closing state, return any one of them
+     *   2) If idle expiry manager is enabled, return the least recently updated channel
+     *   3) Otherwise return any of the channels
+     *
+     * This method is used to close a channel to accommodate a new channel on the inter-broker listener
+     * when broker-wide `max.connections` limit is enabled.
+     */
+    public KafkaChannel lowestPriorityChannel() {
+        KafkaChannel channel = null;
+        if (!closingChannels.isEmpty()) {
+            channel = closingChannels.values().iterator().next();
+        } else if (idleExpiryManager != null && !idleExpiryManager.lruConnections.isEmpty()) {
+            String channelId = idleExpiryManager.lruConnections.keySet().iterator().next();
+            channel = channel(channelId);
+        } else if (!channels.isEmpty()) {
+            channel = channels.values().iterator().next();
+        }
+        return channel;
+    }
+
+    /**
      * Get the channel associated with selectionKey
      */
     private KafkaChannel channel(SelectionKey key) {
@@ -822,7 +1007,7 @@ public class Selector implements Selectable, AutoCloseable {
      */
     private boolean hasStagedReceives() {
         for (KafkaChannel channel : this.stagedReceives.keySet()) {
-            if (!channel.isMute())
+            if (!channel.isMuted())
                 return true;
         }
         return false;
@@ -834,7 +1019,7 @@ public class Selector implements Selectable, AutoCloseable {
      */
     private void addToStagedReceives(KafkaChannel channel, NetworkReceive receive) {
         if (!stagedReceives.containsKey(channel))
-            stagedReceives.put(channel, new ArrayDeque<NetworkReceive>());
+            stagedReceives.put(channel, new ArrayDeque<>());
 
         Deque<NetworkReceive> deque = stagedReceives.get(channel);
         deque.add(receive);
@@ -862,7 +1047,6 @@ public class Selector implements Selectable, AutoCloseable {
     private void addToCompletedReceives(KafkaChannel channel, Deque<NetworkReceive> stagedDeque) {
         NetworkReceive networkReceive = stagedDeque.poll();
         this.completedReceives.add(networkReceive);
-        this.sensors.recordBytesReceived(channel.id(), networkReceive.payload().limit());
     }
 
     // only for testing
@@ -876,7 +1060,7 @@ public class Selector implements Selectable, AutoCloseable {
         return deque == null ? 0 : deque.size();
     }
 
-    private class SelectorMetrics {
+    class SelectorMetrics implements AutoCloseable {
         private final Metrics metrics;
         private final String metricGrpPrefix;
         private final Map<String, String> metricTags;
@@ -885,10 +1069,16 @@ public class Selector implements Selectable, AutoCloseable {
         public final Sensor connectionClosed;
         public final Sensor connectionCreated;
         public final Sensor successfulAuthentication;
+        public final Sensor successfulReauthentication;
+        public final Sensor successfulAuthenticationNoReauth;
+        public final Sensor reauthenticationLatency;
         public final Sensor failedAuthentication;
+        public final Sensor failedReauthentication;
         public final Sensor bytesTransferred;
         public final Sensor bytesSent;
+        public final Sensor requestsSent;
         public final Sensor bytesReceived;
+        public final Sensor responsesReceived;
         public final Sensor selectTime;
         public final Sensor ioTime;
 
@@ -922,33 +1112,62 @@ public class Selector implements Selectable, AutoCloseable {
             this.successfulAuthentication.add(createMeter(metrics, metricGrpName, metricTags,
                     "successful-authentication", "connections with successful authentication"));
 
+            this.successfulReauthentication = sensor("successful-reauthentication:" + tagsSuffix);
+            this.successfulReauthentication.add(createMeter(metrics, metricGrpName, metricTags,
+                    "successful-reauthentication", "successful re-authentication of connections"));
+
+            this.successfulAuthenticationNoReauth = sensor("successful-authentication-no-reauth:" + tagsSuffix);
+            MetricName successfulAuthenticationNoReauthMetricName = metrics.metricName(
+                    "successful-authentication-no-reauth-total", metricGrpName,
+                    "The total number of connections with successful authentication where the client does not support re-authentication",
+                    metricTags);
+            this.successfulAuthenticationNoReauth.add(successfulAuthenticationNoReauthMetricName, new CumulativeSum());
+
             this.failedAuthentication = sensor("failed-authentication:" + tagsSuffix);
             this.failedAuthentication.add(createMeter(metrics, metricGrpName, metricTags,
                     "failed-authentication", "connections with failed authentication"));
 
+            this.failedReauthentication = sensor("failed-reauthentication:" + tagsSuffix);
+            this.failedReauthentication.add(createMeter(metrics, metricGrpName, metricTags,
+                    "failed-reauthentication", "failed re-authentication of connections"));
+
+            this.reauthenticationLatency = sensor("reauthentication-latency:" + tagsSuffix);
+            MetricName reauthenticationLatencyMaxMetricName = metrics.metricName("reauthentication-latency-max",
+                    metricGrpName, "The max latency observed due to re-authentication",
+                    metricTags);
+            this.reauthenticationLatency.add(reauthenticationLatencyMaxMetricName, new Max());
+            MetricName reauthenticationLatencyAvgMetricName = metrics.metricName("reauthentication-latency-avg",
+                    metricGrpName, "The average latency observed due to re-authentication",
+                    metricTags);
+            this.reauthenticationLatency.add(reauthenticationLatencyAvgMetricName, new Avg());
+
             this.bytesTransferred = sensor("bytes-sent-received:" + tagsSuffix);
-            bytesTransferred.add(createMeter(metrics, metricGrpName, metricTags, new Count(),
+            bytesTransferred.add(createMeter(metrics, metricGrpName, metricTags, new WindowedCount(),
                     "network-io", "network operations (reads or writes) on all connections"));
 
             this.bytesSent = sensor("bytes-sent:" + tagsSuffix, bytesTransferred);
             this.bytesSent.add(createMeter(metrics, metricGrpName, metricTags,
                     "outgoing-byte", "outgoing bytes sent to all servers"));
-            this.bytesSent.add(createMeter(metrics, metricGrpName, metricTags, new Count(),
+
+            this.requestsSent = sensor("requests-sent:" + tagsSuffix);
+            this.requestsSent.add(createMeter(metrics, metricGrpName, metricTags, new WindowedCount(),
                     "request", "requests sent"));
             MetricName metricName = metrics.metricName("request-size-avg", metricGrpName, "The average size of requests sent.", metricTags);
-            this.bytesSent.add(metricName, new Avg());
+            this.requestsSent.add(metricName, new Avg());
             metricName = metrics.metricName("request-size-max", metricGrpName, "The maximum size of any request sent.", metricTags);
-            this.bytesSent.add(metricName, new Max());
+            this.requestsSent.add(metricName, new Max());
 
             this.bytesReceived = sensor("bytes-received:" + tagsSuffix, bytesTransferred);
             this.bytesReceived.add(createMeter(metrics, metricGrpName, metricTags,
                     "incoming-byte", "bytes read off all sockets"));
-            this.bytesReceived.add(createMeter(metrics, metricGrpName, metricTags,
-                    new Count(), "response", "responses received"));
+
+            this.responsesReceived = sensor("responses-received:" + tagsSuffix);
+            this.responsesReceived.add(createMeter(metrics, metricGrpName, metricTags,
+                    new WindowedCount(), "response", "responses received"));
 
             this.selectTime = sensor("select-time:" + tagsSuffix);
             this.selectTime.add(createMeter(metrics, metricGrpName, metricTags,
-                    new Count(), "select", "times the I/O layer checked for new I/O to perform"));
+                    new WindowedCount(), "select", "times the I/O layer checked for new I/O to perform"));
             metricName = metrics.metricName("io-wait-time-ns-avg", metricGrpName, "The average length of time the I/O thread spent waiting for a socket ready for reads or writes in nanoseconds.", metricTags);
             this.selectTime.add(metricName, new Avg());
             this.selectTime.add(createIOThreadRatioMeter(metrics, metricGrpName, metricTags, "io-wait", "waiting"));
@@ -960,11 +1179,7 @@ public class Selector implements Selectable, AutoCloseable {
 
             metricName = metrics.metricName("connection-count", metricGrpName, "The current number of active connections.", metricTags);
             topLevelMetricNames.add(metricName);
-            this.metrics.addMetric(metricName, new Measurable() {
-                public double measure(MetricConfig config, long now) {
-                    return channels.size();
-                }
-            });
+            this.metrics.addMetric(metricName, (config, now) -> channels.size());
         }
 
         private Meter createMeter(Metrics metrics, String groupName, Map<String, String> metricTags,
@@ -1003,26 +1218,31 @@ public class Selector implements Selectable, AutoCloseable {
             if (!connectionId.isEmpty() && metricsPerConnection) {
                 // if one sensor of the metrics has been registered for the connection,
                 // then all other sensors should have been registered; and vice versa
-                String nodeRequestName = "node-" + connectionId + ".bytes-sent";
+                String nodeRequestName = "node-" + connectionId + ".requests-sent";
                 Sensor nodeRequest = this.metrics.getSensor(nodeRequestName);
                 if (nodeRequest == null) {
                     String metricGrpName = metricGrpPrefix + "-node-metrics";
-
                     Map<String, String> tags = new LinkedHashMap<>(metricTags);
                     tags.put("node-id", "node-" + connectionId);
 
                     nodeRequest = sensor(nodeRequestName);
-                    nodeRequest.add(createMeter(metrics, metricGrpName, tags, "outgoing-byte", "outgoing bytes"));
-                    nodeRequest.add(createMeter(metrics, metricGrpName, tags, new Count(), "request", "requests sent"));
+                    nodeRequest.add(createMeter(metrics, metricGrpName, tags, new WindowedCount(), "request", "requests sent"));
                     MetricName metricName = metrics.metricName("request-size-avg", metricGrpName, "The average size of requests sent.", tags);
                     nodeRequest.add(metricName, new Avg());
                     metricName = metrics.metricName("request-size-max", metricGrpName, "The maximum size of any request sent.", tags);
                     nodeRequest.add(metricName, new Max());
 
-                    String nodeResponseName = "node-" + connectionId + ".bytes-received";
+                    String bytesSentName = "node-" + connectionId + ".bytes-sent";
+                    Sensor bytesSent = sensor(bytesSentName);
+                    bytesSent.add(createMeter(metrics, metricGrpName, tags, "outgoing-byte", "outgoing bytes"));
+
+                    String nodeResponseName = "node-" + connectionId + ".responses-received";
                     Sensor nodeResponse = sensor(nodeResponseName);
-                    nodeResponse.add(createMeter(metrics, metricGrpName, tags, "incoming-byte", "incoming bytes"));
-                    nodeResponse.add(createMeter(metrics, metricGrpName, tags, new Count(), "response", "responses received"));
+                    nodeResponse.add(createMeter(metrics, metricGrpName, tags, new WindowedCount(), "response", "responses received"));
+
+                    String bytesReceivedName = "node-" + connectionId + ".bytes-received";
+                    Sensor bytesReceive = sensor(bytesReceivedName);
+                    bytesReceive.add(createMeter(metrics, metricGrpName, tags, "incoming-byte", "incoming bytes"));
 
                     String nodeTimeName = "node-" + connectionId + ".latency";
                     Sensor nodeRequestTime = sensor(nodeTimeName);
@@ -1034,25 +1254,43 @@ public class Selector implements Selectable, AutoCloseable {
             }
         }
 
-        public void recordBytesSent(String connectionId, long bytes) {
-            long now = time.milliseconds();
-            this.bytesSent.record(bytes, now);
+        public void recordBytesSent(String connectionId, long bytes, long currentTimeMs) {
+            this.bytesSent.record(bytes, currentTimeMs);
             if (!connectionId.isEmpty()) {
-                String nodeRequestName = "node-" + connectionId + ".bytes-sent";
-                Sensor nodeRequest = this.metrics.getSensor(nodeRequestName);
-                if (nodeRequest != null)
-                    nodeRequest.record(bytes, now);
+                String bytesSentName = "node-" + connectionId + ".bytes-sent";
+                Sensor bytesSent = this.metrics.getSensor(bytesSentName);
+                if (bytesSent != null)
+                    bytesSent.record(bytes, currentTimeMs);
             }
         }
 
-        public void recordBytesReceived(String connection, int bytes) {
-            long now = time.milliseconds();
-            this.bytesReceived.record(bytes, now);
-            if (!connection.isEmpty()) {
-                String nodeRequestName = "node-" + connection + ".bytes-received";
+        public void recordCompletedSend(String connectionId, long totalBytes, long currentTimeMs) {
+            requestsSent.record(totalBytes, currentTimeMs);
+            if (!connectionId.isEmpty()) {
+                String nodeRequestName = "node-" + connectionId + ".requests-sent";
                 Sensor nodeRequest = this.metrics.getSensor(nodeRequestName);
                 if (nodeRequest != null)
-                    nodeRequest.record(bytes, now);
+                    nodeRequest.record(totalBytes, currentTimeMs);
+            }
+        }
+
+        public void recordBytesReceived(String connectionId, long bytes, long currentTimeMs) {
+            this.bytesReceived.record(bytes, currentTimeMs);
+            if (!connectionId.isEmpty()) {
+                String bytesReceivedName = "node-" + connectionId + ".bytes-received";
+                Sensor bytesReceived = this.metrics.getSensor(bytesReceivedName);
+                if (bytesReceived != null)
+                    bytesReceived.record(bytes, currentTimeMs);
+            }
+        }
+
+        public void recordCompletedReceive(String connectionId, long totalBytes, long currentTimeMs) {
+            responsesReceived.record(totalBytes, currentTimeMs);
+            if (!connectionId.isEmpty()) {
+                String nodeRequestName = "node-" + connectionId + ".responses-received";
+                Sensor nodeRequest = this.metrics.getSensor(nodeRequestName);
+                if (nodeRequest != null)
+                    nodeRequest.record(totalBytes, currentTimeMs);
             }
         }
 
@@ -1061,6 +1299,46 @@ public class Selector implements Selectable, AutoCloseable {
                 metrics.removeMetric(metricName);
             for (Sensor sensor : sensors)
                 metrics.removeSensor(sensor.name());
+        }
+    }
+
+    /**
+     * Encapsulate a channel that must be closed after a specific delay has elapsed due to authentication failure.
+     */
+    private class DelayedAuthenticationFailureClose {
+        private final KafkaChannel channel;
+        private final long endTimeNanos;
+        private boolean closed;
+
+        /**
+         * @param channel The channel whose close is being delayed
+         * @param delayMs The amount of time by which the operation should be delayed
+         */
+        public DelayedAuthenticationFailureClose(KafkaChannel channel, int delayMs) {
+            this.channel = channel;
+            this.endTimeNanos = time.nanoseconds() + (delayMs * 1000L * 1000L);
+            this.closed = false;
+        }
+
+        /**
+         * Try to close this channel if the delay has expired.
+         * @param currentTimeNanos The current time
+         * @return True if the delay has expired and the channel was closed; false otherwise
+         */
+        public final boolean tryClose(long currentTimeNanos) {
+            if (endTimeNanos <= currentTimeNanos)
+                closeNow();
+            return closed;
+        }
+
+        /**
+         * Close the channel now, regardless of whether the delay has expired or not.
+         */
+        public final void closeNow() {
+            if (closed)
+                throw new IllegalStateException("Attempt to close a channel that has already been closed");
+            handleCloseOnAuthenticationFailure(channel);
+            closed = true;
         }
     }
 
@@ -1113,5 +1391,10 @@ public class Selector implements Selectable, AutoCloseable {
     //package-private for testing
     boolean isMadeReadProgressLastPoll() {
         return madeReadProgressLastPoll;
+    }
+
+    // package-private for testing
+    Map<?, ?> delayedClosingChannels() {
+        return delayedClosingChannels;
     }
 }

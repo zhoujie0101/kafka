@@ -19,7 +19,6 @@ package org.apache.kafka.streams.state.internals;
 import org.apache.kafka.common.utils.Bytes;
 import org.apache.kafka.common.utils.LogContext;
 import org.apache.kafka.streams.KeyValue;
-import org.apache.kafka.streams.processor.internals.ProcessorRecordContext;
 import org.apache.kafka.streams.processor.internals.metrics.StreamsMetricsImpl;
 import org.slf4j.Logger;
 
@@ -193,7 +192,7 @@ public class ThreadCache {
         }
         return new MemoryLRUCacheBytesIterator(cache.allKeys(), cache);
     }
-    
+
     public long size() {
         long size = 0;
         for (final NamedCache cache : caches.values()) {
@@ -235,7 +234,7 @@ public class ThreadCache {
             // a put on another cache. So even though the sizeInBytes() is
             // still > maxCacheSizeBytes there is nothing to evict from this
             // namespaced cache.
-            if (cache.size() == 0) {
+            if (cache.isEmpty()) {
                 return;
             }
             cache.evict();
@@ -319,11 +318,6 @@ public class ThreadCache {
         }
 
         @Override
-        public void remove() {
-            throw new UnsupportedOperationException("remove not supported by MemoryLRUCacheBytesIterator");
-        }
-
-        @Override
         public void close() {
             // do nothing
         }
@@ -332,9 +326,9 @@ public class ThreadCache {
     static class DirtyEntry {
         private final Bytes key;
         private final byte[] newValue;
-        private final ProcessorRecordContext recordContext;
+        private final LRUCacheEntry recordContext;
 
-        DirtyEntry(final Bytes key, final byte[] newValue, final ProcessorRecordContext recordContext) {
+        DirtyEntry(final Bytes key, final byte[] newValue, final LRUCacheEntry recordContext) {
             this.key = key;
             this.newValue = newValue;
             this.recordContext = recordContext;
@@ -348,7 +342,7 @@ public class ThreadCache {
             return newValue;
         }
 
-        public ProcessorRecordContext recordContext() {
+        public LRUCacheEntry entry() {
             return recordContext;
         }
     }
