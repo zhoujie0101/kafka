@@ -41,19 +41,6 @@ public class SubscriptionInfoTest {
 
     private final static String IGNORED_USER_ENDPOINT = "ignoredUserEndpoint:80";
 
-    @Test
-    public void shouldUseLatestSupportedVersionByDefault() {
-        final SubscriptionInfo info = new SubscriptionInfo(
-            LATEST_SUPPORTED_VERSION,
-            LATEST_SUPPORTED_VERSION,
-            processId,
-            activeTasks,
-            standbyTasks,
-            "localhost:80"
-        );
-        assertEquals(LATEST_SUPPORTED_VERSION, info.version());
-    }
-
     @Test(expected = IllegalArgumentException.class)
     public void shouldThrowForUnknownVersion1() {
         new SubscriptionInfo(
@@ -246,8 +233,8 @@ public class SubscriptionInfoTest {
     }
 
     @Test
-    public void generatedVersion3And4ShouldDecodeLegacyFormat() {
-        for (int version = 3; version <= 5; version++) {
+    public void generatedVersion3To6ShouldDecodeLegacyFormat() {
+        for (int version = 3; version <= 6; version++) {
             final LegacySubscriptionInfoSerde info = new LegacySubscriptionInfoSerde(
                 version,
                 LATEST_SUPPORTED_VERSION,

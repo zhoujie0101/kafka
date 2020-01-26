@@ -16,6 +16,8 @@
  */
 package org.apache.kafka.streams.processor.internals;
 
+import java.util.Collections;
+import java.util.concurrent.ConcurrentHashMap;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.utils.FixedOrderMap;
@@ -100,9 +102,9 @@ public class ProcessorStateManager implements StateManager {
             partitionForTopic.put(source.topic(), source);
         }
         offsetLimits = new HashMap<>();
-        standbyRestoredOffsets = new HashMap<>();
+        standbyRestoredOffsets = new ConcurrentHashMap<>();
         this.isStandby = isStandby;
-        restoreCallbacks = isStandby ? new HashMap<>() : null;
+        restoreCallbacks = isStandby ? new ConcurrentHashMap<>() : null;
         recordConverters = isStandby ? new HashMap<>() : null;
         this.storeToChangelogTopic = new HashMap<>(storeToChangelogTopic);
 
@@ -257,6 +259,10 @@ public class ProcessorStateManager implements StateManager {
         return limit != null ? limit : Long.MAX_VALUE;
     }
 
+    ChangelogReader changelogReader() {
+        return changelogReader;
+    }
+
     @Override
     public StateStore getStore(final String name) {
         return registeredStores.getOrDefault(name, Optional.empty()).orElse(null);
@@ -348,9 +354,7 @@ public class ProcessorStateManager implements StateManager {
 
         updateCheckpointFileCache(checkpointableOffsetsFromProcessing);
 
-        log.trace("Checkpointable offsets updated with active acked offsets: {}", checkpointFileCache);
-
-        log.trace("Writing checkpoint: {}", checkpointFileCache);
+        log.debug("Writing checkpoint: {}", checkpointFileCache);
         try {
             checkpointFile.write(checkpointFileCache);
         } catch (final IOException e) {
@@ -453,5 +457,9 @@ public class ProcessorStateManager implements StateManager {
         }
 
         return result;
+    }
+
+    Map<TopicPartition, Long> standbyRestoredOffsets() {
+        return Collections.unmodifiableMap(standbyRestoredOffsets);
     }
 }
