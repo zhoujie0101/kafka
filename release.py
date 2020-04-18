@@ -550,8 +550,6 @@ regexReplace("streams/quickstart/java/src/main/resources/archetype-resources/pom
 print("updating ducktape version.py")
 regexReplace("./tests/kafkatest/version.py", "^DEV_VERSION =.*",
     "DEV_VERSION = KafkaVersion(\"%s-SNAPSHOT\")" % release_version)
-print("updating ducktape __init__.py")
-regexReplace("./tests/kafkatest/__init__.py", ".dev.*", "")
 # Command in explicit list due to messages with spaces
 cmd("Committing version number updates", ["git", "commit", "-a", "-m", "Bump version to %s" % release_version])
 # Command in explicit list due to messages with spaces
@@ -690,6 +688,8 @@ if not user_ok("Have you sufficiently verified the release artifacts (y/n)?: "):
 print("Next, we need to get the Maven artifacts we published into the staging repository.")
 # TODO: Can we get this closed via a REST API since we already need to collect credentials for this repo?
 print("Go to https://repository.apache.org/#stagingRepositories and hit 'Close' for the new repository that was created by uploading artifacts.")
+print("If this is not the first RC, you need to 'Drop' the previous artifacts.")
+print("Confirm the correct artifacts are visible at https://repository.apache.org/content/groups/staging/org/apache/kafka/")
 if not user_ok("Have you successfully deployed the artifacts (y/n)?: "):
     fail("Ok, giving up")
 if not user_ok("Ok to push RC tag %s (y/n)?: " % rc_tag):

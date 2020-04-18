@@ -252,7 +252,13 @@ subprojects {
       // code in the test (best guess is that it is tail output from last test). We won't have
       // an output file for these, so simply ignore them. If they become critical for debugging,
       // they can be seen with showStandardStreams.
-      if (td.name == td.className) {
+      if (td.name == td.className || td.className == null) {
+        // silently ignore output unrelated to specific test methods
+        return
+      } else if (logStreams.get(tid) == null) {
+        println "WARNING: unexpectedly got output for a test [${tid}]" +
+                " that we didn't previously see in the beforeTest hook." +
+                " Message for debugging: [" + toe.message + "]."
         return
       }
       try {
@@ -295,6 +301,10 @@ subprojects {
     }
     logTestStdout.rehydrate(delegate, owner, this)()
 
+    // The suites are for running sets of tests in IDEs.
+    // Gradle will run each test class, so we exclude the suites to avoid redundantly running the tests twice.
+    exclude '**/*Suite.class'
+
     retry {
       maxRetries = userMaxTestRetries
       maxFailures = userMaxTestRetryFailures
@@ -314,10 +324,18 @@ subprojects {
     }
     logTestStdout.rehydrate(delegate, owner, this)()
 
+    // The suites are for running sets of tests in IDEs.
+    // Gradle will run each test class, so we exclude the suites to avoid redundantly running the tests twice.
+    exclude '**/*Suite.class'
+
     useJUnit {
       includeCategories 'org.apache.kafka.test.IntegrationTest'
     }
 
+    retry {
+      maxRetries = userMaxTestRetries
+      maxFailures = userMaxTestRetryFailures
+    }
   }
 
   task unitTest(type: Test, dependsOn: compileJava) {
@@ -332,11 +350,20 @@ subprojects {
       exceptionFormat = testExceptionFormat
     }
     logTestStdout.rehydrate(delegate, owner, this)()
+    
+    // The suites are for running sets of tests in IDEs.
+    // Gradle will run each test class, so we exclude the suites to avoid redundantly running the tests twice.
+    exclude '**/*Suite.class'
 
     if (it.project.name != 'generator') {
       useJUnit {
         excludeCategories 'org.apache.kafka.test.IntegrationTest'
       }
+    }
+
+    retry {
+      maxRetries = userMaxTestRetries
+      maxFailures = userMaxTestRetryFailures
     }
   }
 
@@ -451,7 +478,7 @@ subprojects {
     // See https://www.lightbend.com/blog/scala-inliner-optimizer for more information about the optimizer.
     scalaCompileOptions.additionalParameters += ["-opt:l:inline"]
     scalaCompileOptions.additionalParameters += inlineFrom
-    
+
     // these options are valid for Scala versions < 2.13 only
     // Scala 2.13 removes them, see https://github.com/scala/scala/pull/6502 and https://github.com/scala/scala/pull/5969
     if (versions.baseScala == '2.12') {
@@ -463,7 +490,7 @@ subprojects {
 
     configure(scalaCompileOptions.forkOptions) {
       memoryMaximumSize = '1g'
-      jvmArgs = ['-Xss2m']
+      jvmArgs = ['-Xss4m']
     }
   }
 
@@ -1264,12 +1291,6 @@ project(':streams') {
     if( !generatedDocsDir.exists() ) { generatedDocsDir.mkdirs() }
     standardOutput = new File(generatedDocsDir, "streams_config.html").newOutputStream()
   }
-
-  test {
-    // The suites are for running sets of tests in IDEs.
-    // Gradle will run each test class, so we exclude the suites to avoid redundantly running the tests twice.
-    exclude '**/*Suite.class'
-  }
 }
 
 project(':streams:streams-scala') {
@@ -1281,6 +1302,7 @@ project(':streams:streams-scala') {
     compile project(':streams')
 
     compile libs.scalaLibrary
+    compile libs.scalaCollectionCompat
 
     testCompile project(':core')
     testCompile project(':core').sourceSets.test.output
@@ -1511,6 +1533,18 @@ project(':streams:upgrade-system-tests-24') {
   }
 }
 
+project(':streams:upgrade-system-tests-25') {
+  archivesBaseName = "kafka-streams-upgrade-system-tests-25"
+
+  dependencies {
+    testCompile libs.kafkaStreams_25
+  }
+
+  systemTestLibs {
+    dependsOn testJar
+  }
+}
+
 project(':jmh-benchmarks') {
 
   apply plugin: 'com.github.johnrengelman.shadow'
@@ -1525,10 +1559,14 @@ project(':jmh-benchmarks') {
     compile project(':core')
     compile project(':clients')
     compile project(':streams')
+    compile project(':core')
+    compile project(':clients').sourceSets.test.output
+    compile project(':core').sourceSets.test.output
     compile libs.jmhCore
-    compile libs.mockitoCore
     annotationProcessor libs.jmhGeneratorAnnProcess
     compile libs.jmhCoreBenchmarks
+    compile libs.mockitoCore
+    compile libs.slf4jlog4j
   }
 
   jar {
@@ -1547,7 +1585,7 @@ project(':jmh-benchmarks') {
 
     doFirst {
       if (System.getProperty("jmhArgs")) {
-          args System.getProperty("jmhArgs").split(',')
+          args System.getProperty("jmhArgs").split(' ')
       }
       args = [shadowJar.archivePath, *args]
     }
