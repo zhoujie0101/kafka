@@ -27,12 +27,12 @@ import org.apache.kafka.common.serialization.Serializer;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.apache.kafka.common.utils.Bytes;
+import org.apache.kafka.common.utils.MockTime;
+import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.common.utils.Utils;
 import org.apache.kafka.streams.KeyValue;
 import org.apache.kafka.streams.StreamsConfig;
 import org.apache.kafka.streams.errors.ProcessorStateException;
-import org.apache.kafka.streams.processor.ProcessorContext;
-import org.apache.kafka.streams.processor.StateRestoreListener;
 import org.apache.kafka.streams.processor.TaskId;
 import org.apache.kafka.streams.processor.internals.metrics.StreamsMetricsImpl;
 import org.apache.kafka.streams.state.KeyValueIterator;
@@ -48,8 +48,8 @@ import org.junit.Before;
 import org.junit.Test;
 import org.rocksdb.BlockBasedTableConfig;
 import org.rocksdb.BloomFilter;
-import org.rocksdb.Filter;
 import org.rocksdb.Cache;
+import org.rocksdb.Filter;
 import org.rocksdb.LRUCache;
 import org.rocksdb.Options;
 import org.rocksdb.Statistics;
@@ -62,8 +62,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
-import static java.nio.charset.StandardCharsets.UTF_8;
 
+import static java.nio.charset.StandardCharsets.UTF_8;
 import static org.easymock.EasyMock.anyObject;
 import static org.easymock.EasyMock.eq;
 import static org.easymock.EasyMock.mock;
@@ -74,8 +74,8 @@ import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertThrows;
 import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
 import static org.powermock.api.easymock.PowerMock.replay;
 import static org.powermock.api.easymock.PowerMock.verify;
 
@@ -85,6 +85,7 @@ public class RocksDBStoreTest {
     final static String METRICS_SCOPE = "metrics-scope";
 
     private File dir;
+    private final Time time = new MockTime();
     private final Serializer<String> stringSerializer = new StringSerializer();
     private final Deserializer<String> stringDeserializer = new StringDeserializer();
 
@@ -103,7 +104,12 @@ public class RocksDBStoreTest {
             Serdes.String(),
             new StreamsConfig(props));
         rocksDBStore = getRocksDBStore();
-        context.metrics().setRocksDBMetricsRecordingTrigger(new RocksDBMetricsRecordingTrigger());
+        context.metrics().setRocksDBMetricsRecordingTrigger(new RocksDBMetricsRecordingTrigger(time));
+    }
+
+    @After
+    public void tearDown() {
+        rocksDBStore.close();
     }
 
     RocksDBStore getRocksDBStore() {
@@ -137,15 +143,10 @@ public class RocksDBStoreTest {
         return getProcessorContext(streamsProps);
     }
 
-    @After
-    public void tearDown() {
-        rocksDBStore.close();
-    }
-
     @Test
     public void shouldAddStatisticsToInjectedMetricsRecorderWhenRecordingLevelIsDebug() {
-        final RocksDBStore store = getRocksDBStoreWithRocksDBMetricsRecorder();
-        final InternalMockProcessorContext mockContext = getProcessorContext(RecordingLevel.DEBUG);
+        rocksDBStore = getRocksDBStoreWithRocksDBMetricsRecorder();
+        context = getProcessorContext(RecordingLevel.DEBUG);
         reset(metricsRecorder);
         metricsRecorder.addStatistics(
             eq(DB_NAME),
@@ -153,46 +154,51 @@ public class RocksDBStoreTest {
         );
         replay(metricsRecorder);
 
-        store.openDB(mockContext);
+        rocksDBStore.openDB(context);
 
         verify(metricsRecorder);
+        reset(metricsRecorder);
     }
 
     @Test
     public void shouldNotAddStatisticsToInjectedMetricsRecorderWhenRecordingLevelIsInfo() {
-        final RocksDBStore store = getRocksDBStoreWithRocksDBMetricsRecorder();
-        final InternalMockProcessorContext mockContext = getProcessorContext(RecordingLevel.INFO);
+        rocksDBStore = getRocksDBStoreWithRocksDBMetricsRecorder();
+        context = getProcessorContext(RecordingLevel.INFO);
         reset(metricsRecorder);
         replay(metricsRecorder);
 
-        store.openDB(mockContext);
+        rocksDBStore.openDB(context);
 
         verify(metricsRecorder);
     }
 
     @Test
     public void shouldRemoveStatisticsFromInjectedMetricsRecorderOnCloseWhenRecordingLevelIsDebug() {
-        final RocksDBStore store = getRocksDBStoreWithRocksDBMetricsRecorder();
-        final InternalMockProcessorContext mockContext = getProcessorContext(RecordingLevel.DEBUG);
-        store.openDB(mockContext);
-        reset(metricsRecorder);
-        metricsRecorder.removeStatistics(DB_NAME);
-        replay(metricsRecorder);
-
-        store.close();
+        rocksDBStore = getRocksDBStoreWithRocksDBMetricsRecorder();
+        try {
+            context = getProcessorContext(RecordingLevel.DEBUG);
+            rocksDBStore.openDB(context);
+            reset(metricsRecorder);
+            metricsRecorder.removeStatistics(DB_NAME);
+            replay(metricsRecorder);
+        } finally {
+            rocksDBStore.close();
+        }
 
         verify(metricsRecorder);
     }
 
     @Test
     public void shouldNotRemoveStatisticsFromInjectedMetricsRecorderOnCloseWhenRecordingLevelIsInfo() {
-        final RocksDBStore store = getRocksDBStoreWithRocksDBMetricsRecorder();
-        final InternalMockProcessorContext mockContext = getProcessorContext(RecordingLevel.INFO);
-        store.openDB(mockContext);
-        reset(metricsRecorder);
-        replay(metricsRecorder);
-
-        store.close();
+        rocksDBStore = getRocksDBStoreWithRocksDBMetricsRecorder();
+        try {
+            context = getProcessorContext(RecordingLevel.INFO);
+            rocksDBStore.openDB(context);
+            reset(metricsRecorder);
+            replay(metricsRecorder);
+        } finally {
+            rocksDBStore.close();
+        }
 
         verify(metricsRecorder);
     }
@@ -211,46 +217,23 @@ public class RocksDBStoreTest {
 
     @Test
     public void shouldNotAddStatisticsToInjectedMetricsRecorderWhenUserProvidesStatistics() {
-        final RocksDBStore store = getRocksDBStoreWithRocksDBMetricsRecorder();
-        final InternalMockProcessorContext mockContext =
-            getProcessorContext(RecordingLevel.DEBUG, RocksDBConfigSetterWithUserProvidedStatistics.class);
+        rocksDBStore = getRocksDBStoreWithRocksDBMetricsRecorder();
+        context = getProcessorContext(RecordingLevel.DEBUG, RocksDBConfigSetterWithUserProvidedStatistics.class);
         replay(metricsRecorder);
 
-        store.openDB(mockContext);
+        rocksDBStore.openDB(context);
         verify(metricsRecorder);
     }
 
     @Test
     public void shouldNotRemoveStatisticsFromInjectedMetricsRecorderOnCloseWhenUserProvidesStatistics() {
-        final RocksDBStore store = getRocksDBStoreWithRocksDBMetricsRecorder();
-        final InternalMockProcessorContext mockContext =
-            getProcessorContext(RecordingLevel.DEBUG, RocksDBConfigSetterWithUserProvidedStatistics.class);
-        store.openDB(mockContext);
+        rocksDBStore = getRocksDBStoreWithRocksDBMetricsRecorder();
+        context = getProcessorContext(RecordingLevel.DEBUG, RocksDBConfigSetterWithUserProvidedStatistics.class);
+        rocksDBStore.openDB(context);
         reset(metricsRecorder);
         replay(metricsRecorder);
 
-        store.close();
-
         verify(metricsRecorder);
-    }
-
-    @Test
-    public void shouldRespectBulkloadOptionsDuringInit() {
-        rocksDBStore.init(context, rocksDBStore);
-
-        final StateRestoreListener restoreListener = context.getRestoreListener(rocksDBStore.name());
-
-        restoreListener.onRestoreStart(null, rocksDBStore.name(), 0L, 0L);
-
-        assertThat(rocksDBStore.getOptions().level0FileNumCompactionTrigger(), equalTo(1 << 30));
-        assertThat(rocksDBStore.getOptions().level0SlowdownWritesTrigger(), equalTo(1 << 30));
-        assertThat(rocksDBStore.getOptions().level0StopWritesTrigger(), equalTo(1 << 30));
-
-        restoreListener.onRestoreEnd(null, rocksDBStore.name(), 0L);
-
-        assertThat(rocksDBStore.getOptions().level0FileNumCompactionTrigger(), equalTo(10));
-        assertThat(rocksDBStore.getOptions().level0SlowdownWritesTrigger(), equalTo(20));
-        assertThat(rocksDBStore.getOptions().level0StopWritesTrigger(), equalTo(36));
     }
 
     @Test
@@ -290,12 +273,7 @@ public class RocksDBStoreTest {
 
         assertTrue(tmpDir.setReadOnly());
 
-        try {
-            rocksDBStore.openDB(tmpContext);
-            fail("Should have thrown ProcessorStateException");
-        } catch (final ProcessorStateException e) {
-            // this is good, do nothing
-        }
+        assertThrows(ProcessorStateException.class, () -> rocksDBStore.openDB(tmpContext));
     }
 
     @Test
@@ -330,36 +308,6 @@ public class RocksDBStoreTest {
             stringDeserializer.deserialize(
                 null,
                 rocksDBStore.get(new Bytes(stringSerializer.serialize(null, "3")))));
-    }
-
-    @Test
-    public void shouldTogglePrepareForBulkloadSetting() {
-        rocksDBStore.init(context, rocksDBStore);
-        final RocksDBStore.RocksDBBatchingRestoreCallback restoreListener =
-            (RocksDBStore.RocksDBBatchingRestoreCallback) rocksDBStore.batchingStateRestoreCallback;
-
-        restoreListener.onRestoreStart(null, null, 0, 0);
-        assertTrue("Should have set bulk loading to true", rocksDBStore.isPrepareForBulkload());
-
-        restoreListener.onRestoreEnd(null, null, 0);
-        assertFalse("Should have set bulk loading to false", rocksDBStore.isPrepareForBulkload());
-    }
-
-    @Test
-    public void shouldTogglePrepareForBulkloadSettingWhenPrexistingSstFiles() {
-        final List<KeyValue<byte[], byte[]>> entries = getKeyValueEntries();
-
-        rocksDBStore.init(context, rocksDBStore);
-        context.restore(rocksDBStore.name(), entries);
-
-        final RocksDBStore.RocksDBBatchingRestoreCallback restoreListener =
-            (RocksDBStore.RocksDBBatchingRestoreCallback) rocksDBStore.batchingStateRestoreCallback;
-
-        restoreListener.onRestoreStart(null, null, 0, 0);
-        assertTrue("Should have not set bulk loading to true", rocksDBStore.isPrepareForBulkload());
-
-        restoreListener.onRestoreEnd(null, null, 0);
-        assertFalse("Should have set bulk loading to false", rocksDBStore.isPrepareForBulkload());
     }
 
     @Test
@@ -503,56 +451,41 @@ public class RocksDBStoreTest {
     @Test
     public void shouldThrowNullPointerExceptionOnNullPut() {
         rocksDBStore.init(context, rocksDBStore);
-        try {
-            rocksDBStore.put(null, stringSerializer.serialize(null, "someVal"));
-            fail("Should have thrown NullPointerException on null put()");
-        } catch (final NullPointerException e) {
-            // this is good
-        }
+        assertThrows(
+            NullPointerException.class,
+            () -> rocksDBStore.put(null, stringSerializer.serialize(null, "someVal")));
     }
 
     @Test
     public void shouldThrowNullPointerExceptionOnNullPutAll() {
         rocksDBStore.init(context, rocksDBStore);
-        try {
-            rocksDBStore.put(null, stringSerializer.serialize(null, "someVal"));
-            fail("Should have thrown NullPointerException on null put()");
-        } catch (final NullPointerException e) {
-            // this is good
-        }
+        assertThrows(
+            NullPointerException.class,
+            () -> rocksDBStore.put(null, stringSerializer.serialize(null, "someVal")));
     }
 
     @Test
     public void shouldThrowNullPointerExceptionOnNullGet() {
         rocksDBStore.init(context, rocksDBStore);
-        try {
-            rocksDBStore.get(null);
-            fail("Should have thrown NullPointerException on null get()");
-        } catch (final NullPointerException e) {
-            // this is good
-        }
+        assertThrows(
+            NullPointerException.class,
+            () -> rocksDBStore.get(null));
     }
 
     @Test
     public void shouldThrowNullPointerExceptionOnDelete() {
         rocksDBStore.init(context, rocksDBStore);
-        try {
-            rocksDBStore.delete(null);
-            fail("Should have thrown NullPointerException on deleting null key");
-        } catch (final NullPointerException e) {
-            // this is good
-        }
+        assertThrows(
+            NullPointerException.class,
+            () -> rocksDBStore.delete(null));
     }
 
     @Test
     public void shouldThrowNullPointerExceptionOnRange() {
         rocksDBStore.init(context, rocksDBStore);
-        try {
-            rocksDBStore.range(null, new Bytes(stringSerializer.serialize(null, "2")));
-            fail("Should have thrown NullPointerException on null range key");
-        } catch (final NullPointerException e) {
-            // this is good
-        }
+        assertThrows(
+            NullPointerException.class,
+            () -> rocksDBStore.range(null, new Bytes(stringSerializer.serialize(null, "2"))));
     }
 
     @Test(expected = ProcessorStateException.class)
@@ -567,16 +500,14 @@ public class RocksDBStoreTest {
 
     @Test
     public void shouldHandleToggleOfEnablingBloomFilters() {
-
         final Properties props = StreamsTestUtils.getStreamsConfig();
         props.put(StreamsConfig.ROCKSDB_CONFIG_SETTER_CLASS_CONFIG, TestingBloomFilterRocksDBConfigSetter.class);
-        rocksDBStore = getRocksDBStore();
         dir = TestUtils.tempDirectory();
         context = new InternalMockProcessorContext(dir,
             Serdes.String(),
             Serdes.String(),
             new StreamsConfig(props));
-        context.metrics().setRocksDBMetricsRecordingTrigger(new RocksDBMetricsRecordingTrigger());
+        context.metrics().setRocksDBMetricsRecordingTrigger(new RocksDBMetricsRecordingTrigger(time));
 
         enableBloomFilters = false;
         rocksDBStore.init(context, rocksDBStore);
@@ -616,20 +547,22 @@ public class RocksDBStoreTest {
 
     @Test
     public void shouldVerifyThatMetricsGetMeasurementsFromRocksDB() {
-        final RocksDBMetricsRecordingTrigger rocksDBMetricsRecordingTrigger = new RocksDBMetricsRecordingTrigger();
+        final TaskId taskId = new TaskId(0, 0);
+
+        final RocksDBMetricsRecordingTrigger rocksDBMetricsRecordingTrigger = new RocksDBMetricsRecordingTrigger(time);
         final Metrics metrics = new Metrics(new MetricConfig().recordLevel(RecordingLevel.DEBUG));
         final StreamsMetricsImpl streamsMetrics =
             new StreamsMetricsImpl(metrics, "test-application", StreamsConfig.METRICS_LATEST);
         streamsMetrics.setRocksDBMetricsRecordingTrigger(rocksDBMetricsRecordingTrigger);
-        final ProcessorContext<Object, Object> context = EasyMock.niceMock(ProcessorContext.class);
+
+        context = EasyMock.niceMock(InternalMockProcessorContext.class);
         EasyMock.expect(context.metrics()).andStubReturn(streamsMetrics);
-        final TaskId taskId = new TaskId(0, 0);
         EasyMock.expect(context.taskId()).andStubReturn(taskId);
         EasyMock.expect(context.appConfigs())
             .andStubReturn(new StreamsConfig(StreamsTestUtils.getStreamsConfig()).originals());
-        EasyMock.expect(context.taskId()).andStubReturn(taskId);
+        EasyMock.expect(context.stateDir()).andStubReturn(dir);
         EasyMock.replay(context);
-        final RocksDBStore rocksDBStore = new RocksDBStore(DB_NAME, METRICS_SCOPE);
+
         rocksDBStore.init(context, rocksDBStore);
         final byte[] key = "hello".getBytes();
         final byte[] value = "world".getBytes();

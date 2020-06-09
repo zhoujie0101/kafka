@@ -16,6 +16,7 @@
  */
 package org.apache.kafka.streams.processor.internals;
 
+import java.util.List;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.TopicPartition;
@@ -39,7 +40,6 @@ public interface Task {
     long LATEST_OFFSET = -2L;
 
     /*
-     *
      * <pre>
      *                 +-------------+
      *          +<---- | Created (0) | <----------------------+
@@ -59,14 +59,9 @@ public interface Task {
      *          |            |                      |         |
      *          |            |                      |         |
      *          |            v                      |         |
-     *          |      +-----+-------+              |         |
-     *          +----> | Closing (4) | <------------+         |
-     *                 +-----+-------+                        |
-     *                       |                                |
-     *                       v                                |
-     *                 +-----+-------+                        |
-     *                 | Closed (5)  | -----------------------+
-     *                 +-------------+
+     *          |      +-----+-------+ <------------+         |
+     *          +----> | Closed (4)  |                        |
+     *                 +-------------+ <----------------------+
      * </pre>
      */
     enum State {
@@ -151,12 +146,12 @@ public interface Task {
      *
      * @throws StreamsException fatal error, should close the thread
      */
-    Map<TopicPartition, Long> prepareCloseClean();
+    void prepareCloseClean();
 
     /**
      * Must be idempotent.
      */
-    void closeClean(final Map<TopicPartition, Long> checkpoint);
+    void closeClean();
 
     /**
      * Prepare to close a task that we may not own. Discard any uncommitted progress and close the task.
@@ -169,6 +164,16 @@ public interface Task {
      * Must be idempotent.
      */
     void closeDirty();
+
+    /**
+     * Updates input partitions and topology after rebalance
+     */
+    void update(final Set<TopicPartition> topicPartitions, final Map<String, List<String>> nodeToSourceTopics);
+
+    /**
+     * Attempt a clean close but do not close the underlying state
+     */
+    void closeAndRecycleState();
 
     /**
      * Revive a closed task to a created one; should never throw an exception
@@ -202,7 +207,7 @@ public interface Task {
 
     default void recordProcessBatchTime(final long processBatchTime) {}
 
-    default void recordProcessTimeRatioAndBufferSize(final long allTaskProcessMs) {}
+    default void recordProcessTimeRatioAndBufferSize(final long allTaskProcessMs, final long now) {}
 
     default boolean process(final long wallClockTime) {
         return false;

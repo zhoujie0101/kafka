@@ -214,9 +214,6 @@ public class StoreChangelogReader implements ChangelogReader {
         this.restoreConsumer = restoreConsumer;
         this.stateRestoreListener = stateRestoreListener;
 
-        // NOTE for restoring active and updating standby we may prefer different poll time
-        // in order to make sure we call the main consumer#poll in time.
-        // TODO: once both of these are moved to a separate thread this may no longer be a concern
         this.pollTime = Duration.ofMillis(config.getLong(StreamsConfig.POLL_MS_CONFIG));
         this.updateOffsetIntervalMs = config.getLong(StreamsConfig.COMMIT_INTERVAL_MS_CONFIG) == Long.MAX_VALUE ?
             DEFAULT_OFFSET_UPDATE_MS : config.getLong(StreamsConfig.COMMIT_INTERVAL_MS_CONFIG);
@@ -413,7 +410,10 @@ public class StoreChangelogReader implements ChangelogReader {
             final ConsumerRecords<byte[], byte[]> polledRecords;
 
             try {
-                polledRecords = restoreConsumer.poll(pollTime);
+                // for restoring active and updating standby we may prefer different poll time
+                // in order to make sure we call the main consumer#poll in time.
+                // TODO: once we move ChangelogReader to a separate thread this may no longer be a concern
+                polledRecords = restoreConsumer.poll(state.equals(ChangelogReaderState.STANDBY_UPDATING) ? Duration.ZERO : pollTime);
             } catch (final InvalidOffsetException e) {
                 log.warn("Encountered {} fetching records from restore consumer for partitions {}, it is likely that " +
                     "the consumer's position has fallen out of the topic partition offset range because the topic was " +
@@ -764,8 +764,9 @@ public class StoreChangelogReader implements ChangelogReader {
         // do not trigger restore listener if we are processing standby tasks
         for (final ChangelogMetadata changelogMetadata : newPartitionsToRestore) {
             if (changelogMetadata.stateManager.taskType() == Task.TaskType.ACTIVE) {
-                final TopicPartition partition = changelogMetadata.storeMetadata.changelogPartition();
-                final String storeName = changelogMetadata.storeMetadata.store().name();
+                final StateStoreMetadata storeMetadata = changelogMetadata.storeMetadata;
+                final TopicPartition partition = storeMetadata.changelogPartition();
+                final String storeName = storeMetadata.store().name();
 
                 long startOffset = 0L;
                 try {
@@ -789,21 +790,22 @@ public class StoreChangelogReader implements ChangelogReader {
     }
 
     @Override
-    public void remove(final Collection<TopicPartition> revokedChangelogs) {
-        // Only changelogs that are initialized that been added to the restore consumer's assignment
+    public void unregister(final Collection<TopicPartition> revokedChangelogs) {
+        // Only changelogs that are initialized have been added to the restore consumer's assignment
         final List<TopicPartition> revokedInitializedChangelogs = new ArrayList<>();
 
         for (final TopicPartition partition : revokedChangelogs) {
             final ChangelogMetadata changelogMetadata = changelogs.remove(partition);
             if (changelogMetadata != null) {
-                if (changelogMetadata.state() != ChangelogState.REGISTERED) {
+                if (!changelogMetadata.state().equals(ChangelogState.REGISTERED)) {
                     revokedInitializedChangelogs.add(partition);
                 }
+
                 changelogMetadata.clear();
             } else {
-                log.debug("Changelog partition {} could not be found, " +
-                    "it could be already cleaned up during the handling" +
-                    "of task corruption and never restore again", partition);
+                log.debug("Changelog partition {} could not be found," +
+                    " it could be already cleaned up during the handling" +
+                    " of task corruption and never restore again", partition);
             }
         }
 

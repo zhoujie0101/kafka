@@ -159,7 +159,8 @@ private object GroupMetadata extends Logging {
  * Case class used to represent group metadata for the ListGroups API
  */
 case class GroupOverview(groupId: String,
-                         protocolType: String)
+                         protocolType: String,
+                         state: String)
 
 /**
  * Case class used to represent group metadata for the DescribeGroup API
@@ -363,6 +364,8 @@ private[group] class GroupMetadata(val groupId: String, initialState: GroupState
 
   def numPending = pendingMembers.size
 
+  def numAwaiting: Int = numMembersAwaitingJoin
+
   def allMemberMetadata = members.values.toList
 
   def rebalanceTimeoutMs = members.values.foldLeft(0) { (timeout, member) =>
@@ -389,10 +392,10 @@ private[group] class GroupMetadata(val groupId: String, initialState: GroupState
                            operation: String): Boolean = {
     if (hasStaticMember(groupInstanceId)
       && getStaticMemberId(groupInstanceId) != memberId) {
-        error(s"given member.id $memberId is identified as a known static member ${groupInstanceId.get}, " +
-          s"but not matching the expected member.id ${getStaticMemberId(groupInstanceId)} during $operation, will " +
-          s"respond with instance fenced error")
-        true
+      error(s"given member.id $memberId is identified as a known static member ${groupInstanceId.get}, " +
+        s"but not matching the expected member.id ${getStaticMemberId(groupInstanceId)} during $operation, will " +
+        s"respond with instance fenced error")
+      true
     } else
       false
   }
@@ -560,7 +563,7 @@ private[group] class GroupMetadata(val groupId: String, initialState: GroupState
   }
 
   def overview: GroupOverview = {
-    GroupOverview(groupId, protocolType.getOrElse(""))
+    GroupOverview(groupId, protocolType.getOrElse(""), state.toString)
   }
 
   def initializeOffsets(offsets: collection.Map[TopicPartition, CommitRecordMetadataAndOffset],
