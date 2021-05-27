@@ -16,8 +16,6 @@
  */
 package org.apache.kafka.streams.processor.internals;
 
-import java.time.Duration;
-
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.serialization.Serdes;
 import org.apache.kafka.common.utils.Bytes;
@@ -27,6 +25,7 @@ import org.apache.kafka.streams.processor.Processor;
 import org.apache.kafka.streams.processor.ProcessorContext;
 import org.apache.kafka.streams.processor.PunctuationType;
 import org.apache.kafka.streams.processor.StateStore;
+import org.apache.kafka.streams.processor.StateStoreContext;
 import org.apache.kafka.streams.processor.TaskId;
 import org.apache.kafka.streams.processor.To;
 import org.apache.kafka.streams.processor.internals.Task.TaskType;
@@ -44,6 +43,7 @@ import org.easymock.EasyMock;
 import org.junit.Before;
 import org.junit.Test;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
@@ -51,8 +51,8 @@ import java.util.List;
 import java.util.function.Consumer;
 
 import static java.util.Arrays.asList;
-import static org.apache.kafka.streams.processor.internals.ProcessorContextImpl.BYTES_KEY_SERIALIZER;
 import static org.apache.kafka.streams.processor.internals.ProcessorContextImpl.BYTEARRAY_VALUE_SERIALIZER;
+import static org.apache.kafka.streams.processor.internals.ProcessorContextImpl.BYTES_KEY_SERIALIZER;
 import static org.easymock.EasyMock.anyLong;
 import static org.easymock.EasyMock.anyObject;
 import static org.easymock.EasyMock.anyString;
@@ -71,13 +71,14 @@ public class ProcessorContextImplTest {
 
     private final StreamsConfig streamsConfig = streamsConfigMock();
 
-    private RecordCollector recordCollector = mock(RecordCollector.class);
+    private final RecordCollector recordCollector = mock(RecordCollector.class);
 
     private static final String KEY = "key";
     private static final Bytes KEY_BYTES = Bytes.wrap(KEY.getBytes());
     private static final long VALUE = 42L;
     private static final byte[] VALUE_BYTES = String.valueOf(VALUE).getBytes();
     private static final long TIMESTAMP = 21L;
+    private static final long STREAM_TIME = 50L;
     private static final ValueAndTimestamp<Long> VALUE_AND_TIMESTAMP = ValueAndTimestamp.make(42L, 21L);
     private static final String STORE_NAME = "underlying-store";
     private static final String REGISTERED_STORE_NAME = "registered-store";
@@ -147,16 +148,26 @@ public class ProcessorContextImplTest {
         );
 
         final StreamTask task = mock(StreamTask.class);
-        ((InternalProcessorContext) context).transitionToActive(task, null, null);
+        expect(task.streamTime()).andReturn(STREAM_TIME);
         EasyMock.expect(task.recordCollector()).andStubReturn(recordCollector);
+        replay(task);
+        ((InternalProcessorContext) context).transitionToActive(task, null, null);
 
-        context.setCurrentNode(new ProcessorNode<String, Long>("fake", null,
-            new HashSet<>(asList(
-                "LocalKeyValueStore",
-                "LocalTimestampedKeyValueStore",
-                "LocalWindowStore",
-                "LocalTimestampedWindowStore",
-                "LocalSessionStore"))));
+        context.setCurrentNode(
+            new ProcessorNode<>(
+                "fake",
+                (org.apache.kafka.streams.processor.api.Processor<String, Long, Object, Object>) null,
+                new HashSet<>(
+                    asList(
+                        "LocalKeyValueStore",
+                        "LocalTimestampedKeyValueStore",
+                        "LocalWindowStore",
+                        "LocalTimestampedWindowStore",
+                        "LocalSessionStore"
+                    )
+                )
+            )
+        );
     }
 
     private ProcessorContextImpl getStandbyContext() {
@@ -216,7 +227,6 @@ public class ProcessorContextImplTest {
 
             checkThrowsUnsupportedOperation(store::flush, "flush()");
             checkThrowsUnsupportedOperation(() -> store.put("1", 1L, 1L), "put()");
-            checkThrowsUnsupportedOperation(() -> store.put("1", 1L), "put()");
 
             assertEquals(iters.get(0), store.fetchAll(0L, 0L));
             assertEquals(windowStoreIter, store.fetch(KEY, 0L, 1L));
@@ -235,7 +245,6 @@ public class ProcessorContextImplTest {
 
             checkThrowsUnsupportedOperation(store::flush, "flush()");
             checkThrowsUnsupportedOperation(() -> store.put("1", ValueAndTimestamp.make(1L, 1L), 1L), "put() [with timestamp]");
-            checkThrowsUnsupportedOperation(() -> store.put("1", ValueAndTimestamp.make(1L, 1L)), "put() [no timestamp]");
 
             assertEquals(timestampedIters.get(0), store.fetchAll(0L, 0L));
             assertEquals(windowStoreIter, store.fetch(KEY, 0L, 1L));
@@ -324,7 +333,7 @@ public class ProcessorContextImplTest {
             store.flush();
             assertTrue(flushExecuted);
 
-            store.put("1", 1L);
+            store.put("1", 1L, 1L);
             assertTrue(putExecuted);
 
             assertEquals(iters.get(0), store.fetchAll(0L, 0L));
@@ -344,7 +353,7 @@ public class ProcessorContextImplTest {
             store.flush();
             assertTrue(flushExecuted);
 
-            store.put("1", ValueAndTimestamp.make(1L, 1L));
+            store.put("1", ValueAndTimestamp.make(1L, 1L), 1L);
             assertTrue(putExecuted);
 
             store.put("1", ValueAndTimestamp.make(1L, 1L), 1L);
@@ -428,26 +437,6 @@ public class ProcessorContextImplTest {
         );
     }
 
-    @SuppressWarnings("deprecation")
-    @Test
-    public void shouldThrowUnsupportedOperationExceptionOnForwardWithChildIndex() {
-        context = getStandbyContext();
-        assertThrows(
-            UnsupportedOperationException.class,
-            () -> context.forward("key", "value", 0)
-        );
-    }
-
-    @SuppressWarnings("deprecation")
-    @Test
-    public void shouldThrowUnsupportedOperationExceptionOnForwardWithChildName() {
-        context = getStandbyContext();
-        assertThrows(
-            UnsupportedOperationException.class,
-            () -> context.forward("key", "value", "child-name")
-        );
-    }
-
     @Test
     public void shouldThrowUnsupportedOperationExceptionOnForwardWithTo() {
         context = getStandbyContext();
@@ -463,16 +452,6 @@ public class ProcessorContextImplTest {
         assertThrows(
             UnsupportedOperationException.class,
             () -> context.commit()
-        );
-    }
-
-    @SuppressWarnings("deprecation")
-    @Test
-    public void shouldThrowUnsupportedOperationExceptionOnScheduleWithInterval() {
-        context = getStandbyContext();
-        assertThrows(
-            UnsupportedOperationException.class,
-            () -> context.schedule(100L, PunctuationType.STREAM_TIME, t -> { })
         );
     }
 
@@ -545,6 +524,11 @@ public class ProcessorContextImplTest {
             UnsupportedOperationException.class,
             () -> context.recordContext()
         );
+    }
+
+    @Test
+    public void shouldMatchStreamTime() {
+        assertEquals(STREAM_TIME, context.currentStreamTimeMs());
     }
 
     @SuppressWarnings("unchecked")
@@ -643,7 +627,7 @@ public class ProcessorContextImplTest {
         expect(windowStore.fetch(anyString(), anyLong())).andReturn(VALUE);
         expect(windowStore.all()).andReturn(iters.get(2));
 
-        windowStore.put(anyString(), anyLong());
+        windowStore.put(anyString(), anyLong(), anyLong());
         expectLastCall().andAnswer(() -> {
             putExecuted = true;
             return null;
@@ -666,7 +650,7 @@ public class ProcessorContextImplTest {
         expect(windowStore.fetch(anyString(), anyLong())).andReturn(VALUE_AND_TIMESTAMP);
         expect(windowStore.all()).andReturn(timestampedIters.get(2));
 
-        windowStore.put(anyString(), anyObject(ValueAndTimestamp.class));
+        windowStore.put(anyString(), anyObject(ValueAndTimestamp.class), anyLong());
         expectLastCall().andAnswer(() -> {
             putExecuted = true;
             return null;
@@ -733,11 +717,10 @@ public class ProcessorContextImplTest {
     }
 
     private <T extends StateStore> void doTest(final String name, final Consumer<T> checker) {
-        final Processor processor = new Processor<String, Long>() {
+        final Processor<String, Long> processor = new Processor<String, Long>() {
             @Override
-            @SuppressWarnings("unchecked")
             public void init(final ProcessorContext context) {
-                final T store = (T) context.getStateStore(name);
+                final T store = context.getStateStore(name);
                 checker.accept(store);
             }
 
@@ -760,7 +743,7 @@ public class ProcessorContextImplTest {
         assertTrue(store.persistent());
         assertTrue(store.isOpen());
 
-        checkThrowsUnsupportedOperation(() -> store.init(null, null), "init()");
+        checkThrowsUnsupportedOperation(() -> store.init((StateStoreContext) null, null), "init()");
         checkThrowsUnsupportedOperation(store::close, "close()");
     }
 

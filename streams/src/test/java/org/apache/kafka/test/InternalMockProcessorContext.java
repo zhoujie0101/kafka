@@ -22,7 +22,8 @@ import org.apache.kafka.common.header.internals.RecordHeaders;
 import org.apache.kafka.common.metrics.Metrics;
 import org.apache.kafka.common.serialization.Serde;
 import org.apache.kafka.common.utils.Bytes;
-import org.apache.kafka.common.utils.SystemTime;
+import org.apache.kafka.common.utils.MockTime;
+import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.streams.KeyValue;
 import org.apache.kafka.streams.StreamsConfig;
 import org.apache.kafka.streams.processor.Cancellable;
@@ -32,6 +33,7 @@ import org.apache.kafka.streams.processor.StateRestoreCallback;
 import org.apache.kafka.streams.processor.StateStore;
 import org.apache.kafka.streams.processor.TaskId;
 import org.apache.kafka.streams.processor.To;
+import org.apache.kafka.streams.processor.api.Record;
 import org.apache.kafka.streams.processor.internals.AbstractProcessorContext;
 import org.apache.kafka.streams.processor.internals.ProcessorNode;
 import org.apache.kafka.streams.processor.internals.ProcessorRecordContext;
@@ -46,7 +48,6 @@ import org.apache.kafka.streams.processor.internals.metrics.StreamsMetricsImpl;
 import org.apache.kafka.streams.state.StateSerdes;
 import org.apache.kafka.streams.state.internals.ThreadCache;
 import org.apache.kafka.streams.state.internals.ThreadCache.DirtyEntryFlushListener;
-import org.apache.kafka.streams.state.internals.metrics.RocksDBMetricsRecordingTrigger;
 
 import java.io.File;
 import java.time.Duration;
@@ -73,16 +74,18 @@ public class InternalMockProcessorContext
     private Serde<?> keySerde;
     private Serde<?> valueSerde;
     private long timestamp = -1L;
+    private final Time time;
     private final Map<String, String> storeToChangelogTopic = new HashMap<>();
 
     public InternalMockProcessorContext() {
         this(null,
             null,
             null,
-            new StreamsMetricsImpl(new Metrics(), "mock", StreamsConfig.METRICS_LATEST),
+            new StreamsMetricsImpl(new Metrics(), "mock", StreamsConfig.METRICS_LATEST, new MockTime()),
             new StreamsConfig(StreamsTestUtils.getStreamsConfig()),
             null,
-            null
+            null,
+            Time.SYSTEM
         );
     }
 
@@ -92,10 +95,16 @@ public class InternalMockProcessorContext
             stateDir,
             null,
             null,
-            new StreamsMetricsImpl(new Metrics(), "mock", config.getString(StreamsConfig.BUILT_IN_METRICS_VERSION_CONFIG)),
+            new StreamsMetricsImpl(
+                new Metrics(),
+                "mock",
+                config.getString(StreamsConfig.BUILT_IN_METRICS_VERSION_CONFIG),
+                new MockTime()
+            ),
             config,
             null,
-            null
+            null,
+            Time.SYSTEM
         );
     }
 
@@ -107,7 +116,8 @@ public class InternalMockProcessorContext
             streamsMetrics,
             new StreamsConfig(StreamsTestUtils.getStreamsConfig()),
             null,
-            null
+            null,
+            Time.SYSTEM
         );
     }
 
@@ -118,10 +128,16 @@ public class InternalMockProcessorContext
             stateDir,
             null,
             null,
-            new StreamsMetricsImpl(new Metrics(), "mock", config.getString(StreamsConfig.BUILT_IN_METRICS_VERSION_CONFIG)),
+            new StreamsMetricsImpl(
+                new Metrics(),
+                "mock",
+                config.getString(StreamsConfig.BUILT_IN_METRICS_VERSION_CONFIG),
+                new MockTime()
+            ),
             config,
             () -> collector,
-            null
+            null,
+            Time.SYSTEM
         );
     }
 
@@ -133,10 +149,11 @@ public class InternalMockProcessorContext
             stateDir,
             keySerde,
             valueSerde,
-            new StreamsMetricsImpl(new Metrics(), "mock", StreamsConfig.METRICS_LATEST),
+            new StreamsMetricsImpl(new Metrics(), "mock", StreamsConfig.METRICS_LATEST, new MockTime()),
             config,
             null,
-            null
+            null,
+            Time.SYSTEM
         );
     }
 
@@ -152,10 +169,11 @@ public class InternalMockProcessorContext
             null,
             serdes.keySerde(),
             serdes.valueSerde(),
-            new StreamsMetricsImpl(metrics, "mock", StreamsConfig.METRICS_LATEST),
+            new StreamsMetricsImpl(metrics, "mock", StreamsConfig.METRICS_LATEST, new MockTime()),
             new StreamsConfig(StreamsTestUtils.getStreamsConfig()),
             () -> collector,
-            null
+            null,
+            Time.SYSTEM
         );
     }
 
@@ -168,10 +186,11 @@ public class InternalMockProcessorContext
             stateDir,
             keySerde,
             valueSerde,
-            new StreamsMetricsImpl(new Metrics(), "mock", StreamsConfig.METRICS_LATEST),
+            new StreamsMetricsImpl(new Metrics(), "mock", StreamsConfig.METRICS_LATEST, new MockTime()),
             new StreamsConfig(StreamsTestUtils.getStreamsConfig()),
             () -> collector,
-            cache
+            cache,
+            Time.SYSTEM
         );
     }
 
@@ -181,7 +200,8 @@ public class InternalMockProcessorContext
                                         final StreamsMetricsImpl metrics,
                                         final StreamsConfig config,
                                         final RecordCollector.Supplier collectorSupplier,
-                                        final ThreadCache cache) {
+                                        final ThreadCache cache,
+                                        final Time time) {
         super(
             new TaskId(0, 0),
             config,
@@ -193,7 +213,7 @@ public class InternalMockProcessorContext
         this.keySerde = keySerde;
         this.valueSerde = valueSerde;
         this.recordCollectorSupplier = collectorSupplier;
-        this.metrics().setRocksDBMetricsRecordingTrigger(new RocksDBMetricsRecordingTrigger(new SystemTime()));
+        this.time = time;
     }
 
     @Override
@@ -253,15 +273,10 @@ public class InternalMockProcessorContext
         stateManager().registerStore(store, func);
     }
 
+    @SuppressWarnings("unchecked")
     @Override
-    public StateStore getStateStore(final String name) {
-        return storeMap.get(name);
-    }
-
-    @Override
-    @Deprecated
-    public Cancellable schedule(final long interval, final PunctuationType type, final Punctuator callback) {
-        throw new UnsupportedOperationException("schedule() not supported.");
+    public <S extends StateStore> S getStateStore(final String name) {
+        return (S) storeMap.get(name);
     }
 
     @Override
@@ -275,20 +290,30 @@ public class InternalMockProcessorContext
     public void commit() {}
 
     @Override
+    public <K, V> void forward(final Record<K, V> record) {
+        forward(record, null);
+    }
+
+    @SuppressWarnings("unchecked")
+    @Override
+    public <K, V> void forward(final Record<K, V> record, final String childName) {
+        if (recordContext != null && record.timestamp() != recordContext.timestamp()) {
+            setTime(record.timestamp());
+        }
+        final ProcessorNode<?, ?, ?, ?> thisNode = currentNode;
+        try {
+            for (final ProcessorNode<?, ?, ?, ?> childNode : thisNode.children()) {
+                currentNode = childNode;
+                ((ProcessorNode<K, V, ?, ?>) childNode).process(record);
+            }
+        } finally {
+            currentNode = thisNode;
+        }
+    }
+
+    @Override
     public void forward(final Object key, final Object value) {
         forward(key, value, To.all());
-    }
-
-    @Override
-    @Deprecated
-    public void forward(final Object key, final Object value, final int childIndex) {
-        forward(key, value, To.child((currentNode().children()).get(childIndex).name()));
-    }
-
-    @Override
-    @Deprecated
-    public void forward(final Object key, final Object value, final String childName) {
-        forward(key, value, To.child(childName));
     }
 
     @SuppressWarnings("unchecked")
@@ -298,12 +323,13 @@ public class InternalMockProcessorContext
         if (toInternal.hasTimestamp()) {
             setTime(toInternal.timestamp());
         }
-        final ProcessorNode<?, ?> thisNode = currentNode;
+        final ProcessorNode<?, ?, ?, ?> thisNode = currentNode;
         try {
-            for (final ProcessorNode<?, ?> childNode : thisNode.children()) {
+            for (final ProcessorNode<?, ?, ?, ?> childNode : thisNode.children()) {
                 if (toInternal.child() == null || toInternal.child().equals(childNode.name())) {
                     currentNode = childNode;
-                    ((ProcessorNode<Object, Object>) childNode).process(key, value);
+                    final Record<Object, Object> record = new Record<>(key, value, toInternal.timestamp(), headers());
+                    ((ProcessorNode<Object, Object, ?, ?>) childNode).process(record);
                     toInternal.update(to); // need to reset because MockProcessorContext is shared over multiple
                                            // Processors and toInternal might have been modified
                 }
@@ -334,6 +360,16 @@ public class InternalMockProcessorContext
             return timestamp;
         }
         return recordContext.timestamp();
+    }
+
+    @Override
+    public long currentSystemTimeMs() {
+        return time.milliseconds();
+    }
+
+    @Override
+    public long currentStreamTimeMs() {
+        throw new UnsupportedOperationException("this method is not supported in InternalMockProcessorContext");
     }
 
     @Override
@@ -383,7 +419,7 @@ public class InternalMockProcessorContext
             key,
             value,
             null,
-            taskId().partition,
+            taskId().partition(),
             timestamp,
             BYTES_KEY_SERIALIZER,
             BYTEARRAY_VALUE_SERIALIZER);

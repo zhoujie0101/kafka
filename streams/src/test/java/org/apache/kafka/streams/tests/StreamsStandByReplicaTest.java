@@ -26,6 +26,7 @@ import org.apache.kafka.common.utils.Utils;
 import org.apache.kafka.streams.KafkaStreams;
 import org.apache.kafka.streams.StreamsBuilder;
 import org.apache.kafka.streams.StreamsConfig;
+import org.apache.kafka.streams.errors.StreamsUncaughtExceptionHandler;
 import org.apache.kafka.streams.kstream.Consumed;
 import org.apache.kafka.streams.kstream.KStream;
 import org.apache.kafka.streams.kstream.Materialized;
@@ -43,7 +44,6 @@ import java.util.Set;
 
 public class StreamsStandByReplicaTest {
 
-    @SuppressWarnings("deprecation") // TODO revisit in follow up PR
     public static void main(final String[] args) throws IOException {
         if (args.length < 2) {
             System.err.println("StreamsStandByReplicaTest are expecting two parameters: " +
@@ -65,7 +65,7 @@ public class StreamsStandByReplicaTest {
         }
         
         streamsProperties.put(StreamsConfig.APPLICATION_ID_CONFIG, "kafka-streams-standby-tasks");
-        streamsProperties.put(StreamsConfig.COMMIT_INTERVAL_MS_CONFIG, 100);
+        streamsProperties.put(StreamsConfig.COMMIT_INTERVAL_MS_CONFIG, 100L);
         streamsProperties.put(StreamsConfig.NUM_STANDBY_REPLICAS_CONFIG, 1);
         streamsProperties.put(StreamsConfig.CACHE_MAX_BYTES_BUFFERING_CONFIG, 0);
         streamsProperties.put(StreamsConfig.DEFAULT_KEY_SERDE_CLASS_CONFIG, Serdes.String().getClass());
@@ -128,11 +128,11 @@ public class StreamsStandByReplicaTest {
 
         final KafkaStreams streams = new KafkaStreams(builder.build(), streamsProperties);
 
-        streams.setUncaughtExceptionHandler((t, e) -> {
+        streams.setUncaughtExceptionHandler(e -> {
             System.err.println("FATAL: An unexpected exception " + e);
             e.printStackTrace(System.err);
             System.err.flush();
-            shutdown(streams);
+            return StreamsUncaughtExceptionHandler.StreamThreadExceptionResponse.SHUTDOWN_CLIENT;
         });
 
         streams.setStateListener((newState, oldState) -> {
@@ -159,7 +159,6 @@ public class StreamsStandByReplicaTest {
         streams.close(Duration.ofSeconds(10));
     }
 
-    @SuppressWarnings("deprecation") // TODO revisit in follow up PR
     private static boolean confirmCorrectConfigs(final Properties properties) {
         return properties.containsKey(StreamsConfig.consumerPrefix(ConsumerConfig.MAX_POLL_INTERVAL_MS_CONFIG)) &&
                properties.containsKey(StreamsConfig.producerPrefix(ProducerConfig.RETRIES_CONFIG)) &&
